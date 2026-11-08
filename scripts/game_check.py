@@ -31,7 +31,8 @@ SUPPORTED = {
     # NHL 24 CUSA37933 (US, UP0006) 1.60, SDK 10.50: Frostbite engine.
     '2826e477972fa61d626cc02fde81e4c84a79c8d1cb5711a959563fb86920fc67': dict(
         name='nhl24', title='CUSA37933', version='01.60', game='NHL 24', update='CUSA37933-patch',
-        modules=('libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx'), patches=False),
+        modules=('libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx',
+                 'Engine.Render.Core2.PlatformPs4.prx', 'Engine.BuildInfo.prx'), patches=False),
 }
 BY_TITLE = {p['title']: p for p in SUPPORTED.values()}
 # Images that are known NOT to be 1.14: the base game's executable (1.00). With a 1.14 param.sfo

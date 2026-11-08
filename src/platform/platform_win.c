@@ -760,6 +760,9 @@ static void report_appearance_pool(const CONTEXT *c) {
         node = fields[0];
     }
 }
+/* NHL 24 diagnostic: the last access fault the GPU tracking handled on this thread. */
+static __thread uintptr_t tracked_fault_rip, tracked_fault_rsp;
+static __thread unsigned long long tracked_faults;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (InterlockedExchange(&fatal_reported, 1)) { Sleep(INFINITE); }
     const EXCEPTION_RECORD *record = info->ExceptionRecord;
@@ -778,6 +781,12 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
             c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->Rbp, c->Rsp);
     fprintf(stderr, "  r8 =%016llx r9 =%016llx r10=%016llx r11=%016llx\n  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
             c->R8, c->R9, c->R10, c->R11, c->R12, c->R13, c->R14, c->R15);
+    if (tracked_faults) {
+        char last[MAX_PATH + 64];
+        describe_rip(last, sizeof(last), tracked_fault_rip);
+        fprintf(stderr, "  last handled tracking fault on this thread: %s, rsp=%016llx, %llu in total\n",
+                last, (unsigned long long)tracked_fault_rsp, tracked_faults);
+    } else fprintf(stderr, "  no tracking fault was handled on this thread\n");
     report_appearance_pool(c);
     if (fault_extra) fault_extra(info);
     /* rbp chain (guest and host code keep frame pointers). */
@@ -906,7 +915,12 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
         sse4a_emulate(info->ContextRecord)) return EXCEPTION_CONTINUE_EXECUTION;
     if (code == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2) {
         /* GPU page tracking (write-protected guest pages) is resolved first. */
-        if (gpu_fault && gpu_fault(info, (void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+        if (gpu_fault && gpu_fault(info, (void *)record->ExceptionInformation[1])) {
+            tracked_fault_rip = (uintptr_t)info->ContextRecord->Rip;
+            tracked_fault_rsp = (uintptr_t)info->ContextRecord->Rsp;
+            ++tracked_faults;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         bb_fault_jmp_buf *recover = recover_point ? recover_point() : NULL;
         if (recover) {
             /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes

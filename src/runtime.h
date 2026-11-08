@@ -48,6 +48,8 @@ void runtime_rwlock_report(void);
 void runtime_set_libc_tls(const void *data, uint64_t filesz, uint64_t memsz);
 void runtime_set_module_tls(uint64_t module, const void *data, uint64_t filesz, uint64_t memsz);
 void runtime_set_procparam(void *param);
+/* NHL 24: the guest image (deferred modules, call-site logging). */
+void runtime_set_guest_image(const unsigned char *base, uint64_t size);
 void **runtime_application_heap_api(void);
 uintptr_t runtime_thread_resolve(const char *name);
 void runtime_thread_report(void);
@@ -67,6 +69,12 @@ typedef struct { uint64_t functions, found, patched, unpatched, displaced, stub_
 uint64_t runtime_fp_patch_image(unsigned char *image, uint64_t size, const uint64_t *seg_address, const uint64_t *seg_size,
                                 const uint64_t *seg_flags, uint64_t segments, const uint64_t *pointers, uint64_t pointer_count,
                                 void *(*map_near)(size_t), RuntimeFpStats *stats);
+/* Windows: guest red-zone accesses moved 64 KiB lower (exception frames overwrite the red zone).
+ * RuntimeFpStats: found/patched/unpatched accesses, displaced = switch-table entries seen. */
+int runtime_redzone_enabled(void);
+uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const uint64_t *seg_address, const uint64_t *seg_size,
+                                     const uint64_t *seg_flags, uint64_t segments, const uint64_t *pointers, uint64_t pointer_count,
+                                     void *(*map_near)(size_t), RuntimeFpStats *stats);
 int32_t *runtime_errno(void);
 /* UFC-57 (runtime_ui.c): the UI snapshot builder waits for the renderer once it is ahead.
  * `runtime_ui_build_site` is the return address of the builder's lock call (0: off). */

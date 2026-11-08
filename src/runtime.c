@@ -25,8 +25,23 @@ static _Atomic size_t memory_calls;
 static struct { const void *data; uint64_t filesz, memsz; } tls_modules[TLS_MODULES];
 static _Thread_local unsigned char *tls_blocks[TLS_MODULES];
 static void *process_param;
+uint64_t runtime_flexible_param; /* NHL 24: SceKernelMemParam flexible_memory_size, 0 when unset */
 void runtime_set_procparam(void *param) {
     process_param=param;
+    {   /* SceProcParam: +0x00 size, +0x08 magic/entries, +0x10 SDK, ... +0x38 SceKernelMemParam *. */
+        const uint64_t *q=(const uint64_t *)param;
+        if (q) {
+            printf("Runtime: process parameters: size %#llx, SDK %#llx",(unsigned long long)q[0],(unsigned long long)(q[0]>=0x18 ? q[2] : 0));
+            const uint64_t *mp=q[0]>=0x40 ? (const uint64_t *)q[7] : NULL;
+            if (mp) {
+                printf(", memory parameter size %#llx",(unsigned long long)mp[0]);
+                const uint64_t *flex=mp[0]>=0x18 ? (const uint64_t *)mp[2] : NULL;
+                if (flex) { runtime_flexible_param=*flex; printf(", flexible memory %llu MiB",(unsigned long long)(*flex>>20)); }
+                else printf(", flexible memory not set (448 MiB)");
+            } else printf(", no memory parameter");
+            printf("\n");
+        }
+    }
     /* bbport: the game's libc heap settings (SceProcParam +0x30: SceLibcParam; its +0x10.. pointers to
      * the heap size, delayed and extended allocation flags, initial size). */
     const uint64_t *p=(const uint64_t *)param;

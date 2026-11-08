@@ -52,7 +52,8 @@ static uint64_t flexible_size_bytes(void) {
 #define PAGE UINT64_C(16384)
 #define USER_MIN UINT64_C(0x1000000000)
 #define USER_MAX UINT64_C(0xfc00000000)
-#define LIMIT 4096
+/* NHL 24: thousands of small allocations going into a match (4096 were not enough). */
+#define LIMIT 65536
 #define INVALID ((int32_t)UINT32_C(0x80020016))
 #define NO_MEMORY ((int32_t)UINT32_C(0x8002000c))
 #define ACCESS ((int32_t)UINT32_C(0x8002000d))
@@ -388,6 +389,8 @@ static uintptr_t find_free(uintptr_t hint, uint64_t size, uint64_t alignment) {
         if (i==vma_count || vmas[i].start>=at+size) return at;
         at=align_up(vmas[i].end,alignment);
     }
+    /* NHL 24: no room above the hint; the PS4 then searches from the bottom of the range. */
+    if (hint>USER_MIN) return find_free(USER_MIN,size,alignment);
     return 0;
 }
 static void drop_range(uintptr_t start, uintptr_t end) {
@@ -444,6 +447,26 @@ static void memory_failure(const char *call, uint64_t address, uint64_t size, in
     fprintf(stderr,"Runtime: %s %#" PRIx64 ", size=%" PRIu64 ", flags=0x%x failed (0x%x) from +%#" PRIx64 " < +%#" PRIx64 " < +%#" PRIx64 "\n",
             call,address,size,flags,(unsigned)result,sites[0],sites[1],sites[2]);
 }
+/* NHL 24: the lowest free range of [low,end) that fits, over the used blocks sorted by start. */
+static Block sorted_blocks[LIMIT];
+static int block_order(const void *a, const void *b) {
+    const uint64_t x=((const Block *)a)->start, y=((const Block *)b)->start;
+    return x<y ? -1 : x>y;
+}
+static uint64_t lowest_gap(uint64_t low, uint64_t end, uint64_t size, uint64_t alignment) {
+    int n=0;
+    for (int i=0;i<LIMIT;++i) if (blocks[i].used) sorted_blocks[n++]=blocks[i];
+    qsort(sorted_blocks,(size_t)n,sizeof *sorted_blocks,block_order);
+    uint64_t at=align_up(low,alignment);
+    for (int i=0;i<n;++i) {
+        const Block *b=&sorted_blocks[i];
+        if (b->start+b->size<=at) continue;
+        if (at>end || size>end-at) return UINT64_MAX;
+        if (at+size<=b->start) return at;
+        at=align_up(b->start+b->size,alignment);
+    }
+    return at<=end && size<=end-at ? at : UINT64_MAX;
+}
 static ABI uint64_t direct_size(void) { return POOL_SIZE; }
 static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
                                   uint64_t alignment, int type, int64_t *out) {
@@ -454,23 +477,30 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
     if ((uint64_t)low >= end || size > end - (uint64_t)low) return NO_SPACE;
     write_lock();
     if (pool()) { write_unlock(); return NO_MEMORY; }
-    uint64_t start = align_up((uint64_t)low, alignment);
+    /* Free entry: from the last one handed out. Free range: first where the previous allocation
+     * with the same lower bound ended; else the lowest gap that fits, over the blocks sorted. */
+    static int slot_hint;
+    static uint64_t cursor_low = UINT64_MAX, cursor;
     int slot = -1;
-    for (int i=0; i<LIMIT; ++i) if (!blocks[i].used) { slot=i; break; }
-    for (;;) {
-        if (slot<0 || start > end || size > end-start) {
-            write_unlock(); memory_failure("direct allocation",(uint64_t)low,size,type,NO_SPACE); return NO_SPACE;
-        }
-        int overlap = 0;
-        for (int i=0; i<LIMIT; ++i) {
-            Block b = blocks[i];
-            if (b.used && start < b.start+b.size && b.start < start+size) {
-                start = align_up(b.start+b.size, alignment); overlap = 1; break;
-            }
-        }
-        if (!overlap) break;
+    for (int n=0; n<LIMIT; ++n) {
+        const int i = (slot_hint + n) % LIMIT;
+        if (!blocks[i].used) { slot=i; break; }
+    }
+    uint64_t start = UINT64_MAX;
+    if (slot>=0 && cursor_low==(uint64_t)low) {
+        const uint64_t at = align_up(cursor, alignment);
+        int clear = at>=(uint64_t)low && at<=end && size<=end-at;
+        for (int i=0; clear && i<LIMIT; ++i)
+            if (blocks[i].used && at < blocks[i].start+blocks[i].size && blocks[i].start < at+size) clear = 0;
+        if (clear) start = at;
+    }
+    if (slot>=0 && start==UINT64_MAX) start = lowest_gap((uint64_t)low,end,size,alignment);
+    if (slot<0 || start==UINT64_MAX) {
+        write_unlock(); memory_failure(slot<0 ? "direct allocation (table full)" : "direct allocation",
+                                       (uint64_t)low,size,type,NO_SPACE); return NO_SPACE;
     }
     blocks[slot] = (Block){start, size, type, 1}; *out = (int64_t)start;
+    slot_hint = (slot + 1) % LIMIT; cursor_low = (uint64_t)low; cursor = start + size;
     ensure_chunks(start,size);
     ++allocations; live_bytes += size;
     write_unlock();
@@ -487,12 +517,16 @@ static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags,
     return result;
 }
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
+    const uint64_t wanted=out ? (uint64_t)(uintptr_t)*out : 0;
     write_lock();
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
     write_unlock();
     flush_hooks();
     if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", *out, size, prot);
-    else printf("Runtime: mapping direct memory %#" PRIx64 ", size=%" PRIu64 " failed (error %#x)\n", (uint64_t)physical, size, (unsigned)result);
+    else {
+        printf("Runtime: mapping direct memory %#" PRIx64 ", size=%" PRIu64 " failed (error %#x)\n", (uint64_t)physical, size, (unsigned)result);
+        memory_failure("map direct memory at",wanted,size,flags,result);
+    }
     return result;
 }
 static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int flags, int64_t physical,
@@ -504,13 +538,17 @@ static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int fla
 static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type);
 static ABI int32_t direct_map2(void **out, uint64_t size, int type, int prot, int flags, int64_t physical,
                                uint64_t alignment) {
+    const uint64_t wanted=out ? (uint64_t)(uintptr_t)*out : 0;
     write_lock();
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
     if (!result && type>=0) protect_locked((uintptr_t)*out,size,prot,type);
     write_unlock();
     flush_hooks();
     if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x, type=%d (MapDirectMemory2)\n", *out, size, prot, type);
-    else printf("Runtime: mapping direct memory %#" PRIx64 ", size=%" PRIu64 " failed (error %#x, MapDirectMemory2)\n", (uint64_t)physical, size, (unsigned)result);
+    else {
+        printf("Runtime: mapping direct memory %#" PRIx64 ", size=%" PRIu64 " failed (error %#x, MapDirectMemory2)\n", (uint64_t)physical, size, (unsigned)result);
+        memory_failure("map direct memory (2) at",wanted,size,flags,result);
+    }
     return result;
 }
 static int32_t unmap_locked(uintptr_t start, uint64_t size) {

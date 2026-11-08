@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdio>
 #include "bbport_toggles.h"
 #include <atomic>
 #include <ranges>
@@ -285,24 +287,46 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
     const bool partially_transited = !subresource_states.empty();
 
     if (needs_partial_transition || partially_transited) {
-        if (!partially_transited) {
-            subresource_states.resize(info.resources.levels * info.resources.layers);
+        // NHL 24: the layout list belongs to the backing, which images with other level/layer
+        // counts can share; rebuild it when it was sized for a different image.
+        const size_t wanted_states = size_t(info.resources.levels) * info.resources.layers;
+        if (partially_transited && subresource_states.size() != wanted_states) {
+            static bool shown;
+            if (!shown) {
+                shown = true;
+                std::printf("GPU: image %#llx: layout list of %zu entries rebuilt for %u levels x %u layers (shared backing)\n",
+                            (unsigned long long)info.guest_address, subresource_states.size(),
+                            info.resources.levels, info.resources.layers);
+            }
+        }
+        if (!partially_transited || subresource_states.size() != wanted_states) {
+            subresource_states.resize(wanted_states);
             std::fill(subresource_states.begin(), subresource_states.end(), last_state);
+        }
+        // The requested range, clipped to this image's own levels and layers.
+        u32 range_level = 0, range_level_end = info.resources.levels;
+        u32 range_layer = 0, range_layer_end = info.resources.layers;
+        if (needs_partial_transition) {
+            range_level = std::min<u32>(subres_range->base.level, info.resources.levels);
+            range_level_end = std::min<u32>(subres_range->base.level + subres_range->extent.levels, info.resources.levels);
+            range_layer = std::min<u32>(subres_range->base.layer, info.resources.layers);
+            range_layer_end = std::min<u32>(subres_range->base.layer + subres_range->extent.layers, info.resources.layers);
+            static bool clipped_shown;
+            if (!clipped_shown && (range_level_end - range_level != subres_range->extent.levels ||
+                                   range_layer_end - range_layer != subres_range->extent.layers)) {
+                clipped_shown = true;
+                std::printf("GPU: image %#llx: transition of levels %u+%u layers %u+%u clipped to %u levels x %u layers\n",
+                            (unsigned long long)info.guest_address, subres_range->base.level,
+                            subres_range->extent.levels, subres_range->base.layer, subres_range->extent.layers,
+                            info.resources.levels, info.resources.layers);
+            }
         }
 
         // In case of partial transition, we need to change the specified subresources only.
         // Otherwise all subresources need to be set to the same state so we can use a full
         // resource transition for the next time.
-        const auto mips =
-            needs_partial_transition
-                ? std::ranges::views::iota(subres_range->base.level,
-                                           subres_range->base.level + subres_range->extent.levels)
-                : std::views::iota(0u, info.resources.levels);
-        const auto layers =
-            needs_partial_transition
-                ? std::ranges::views::iota(subres_range->base.layer,
-                                           subres_range->base.layer + subres_range->extent.layers)
-                : std::views::iota(0u, info.resources.layers);
+        const auto mips = std::views::iota(range_level, range_level_end);
+        const auto layers = std::views::iota(range_layer, range_layer_end);
 
         for (u32 mip : mips) {
             for (u32 layer : layers) {

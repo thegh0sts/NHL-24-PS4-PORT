@@ -45,6 +45,8 @@ if [[ ${BB_SKIP_PREPARE:-0} != 1 ]]; then
         --app-version "$version" --title-id "$title" --out "$out" --settings "$BB_CONFIG"
 fi
 patch_args=(); [[ -f $out/patches.bin ]] && patch_args=(--patches "$out/patches.bin")
+# NHL 24: game modules the game starts itself (scripts/link_modules.py writes the list).
+[[ -f $out/dynamic_modules.txt ]] && export BB_DYNAMIC_MODULES="$PWD/$out/dynamic_modules.txt"
 export BB_NEO=${BB_NEO:-0}
 # NHL 19: with the runtime's offline network answers the sim thread reads an online-service object
 # that was never made (guest fault at 0x3846425, a null global); with the network mode on
@@ -53,6 +55,12 @@ export BB_NEO=${BB_NEO:-0}
 if [[ $profile == nhl19 && -z ${BB_ONLINE_SERVER+set} ]]; then
     export BB_ONLINE_SERVER=127.0.0.1
     echo "run-msys2: NHL 19: network mode on (BB_ONLINE_SERVER=127.0.0.1)"
+fi
+# NHL 24: the PS4's floating-point mode in the game's threads (BB_DETERMINISTIC_FP, as NHL 19 has
+# through its network mode). Without it the GPU is lost (device lost) at the first screens.
+if [[ $profile == nhl24 ]]; then
+    export BB_DETERMINISTIC_FP=${BB_DETERMINISTIC_FP:-1}
+    echo "run-msys2: NHL 24: PS4 floating-point mode (BB_DETERMINISTIC_FP=$BB_DETERMINISTIC_FP)"
 fi
 # Ignite games (UFC 3, NHL 19): the 3D scene renders black without precise readbacks of linear
 # images (shadPS4 issue #4375 for UFC 4, same engine); the rest as run.sh's ufc3 defaults: twins

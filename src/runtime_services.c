@@ -143,6 +143,52 @@ static ABI const char *net_ntop(int af,const void *src,char *dst,uint32_t size) 
     if (af!=2) { net_errno=47; return NULL; }
     return inet_ntop(AF_INET,src,dst,size);
 }
+/* NHL 24: offline sockets. EA's network start-up opens a UDP socket (UPnP) and gives up if it
+ * cannot; a PS4 without a network still creates sockets, only connecting and sending fail.
+ * On for the nhl24 profile; BB_OFFLINE_SOCKETS=1/0 forces it for any game. */
+#define NET_EAGAIN ((int32_t)0x80410123)
+static int offline_sockets(void) {
+    static int on=-1;
+    if (on<0) {
+        const char *v=getenv("BB_OFFLINE_SOCKETS"), *profile=getenv("BB_GAME_PROFILE");
+        on = v && *v ? *v!='0' : profile && !strcmp(profile,"nhl24");
+        if (on) note("Net: offline sockets (created; nothing is sent or received)");
+    }
+    return on;
+}
+static ABI int32_t sock_create(const char *name,int family,int type,int protocol) {
+    (void)family; (void)protocol;
+    if (!offline_sockets()) return net_unreachable();
+    int id=new_id();
+    static int shown;
+    if (shown++<8) printf("Runtime: Net: socket '%s' (type %d) -> %d (offline)\n",name ? name : "",type,id);
+    return id;
+}
+static ABI int32_t sock_ok(void) { return offline_sockets() ? 0 : net_unreachable(); }
+static ABI int32_t sock_getsockopt(int s,int level,int option,void *value,uint32_t *length) {
+    (void)s; (void)level; (void)option;
+    if (!offline_sockets()) return net_unreachable();
+    if (value && length && *length) memset(value,0,*length);
+    return 0;
+}
+static ABI int32_t sock_getsockname(int s,unsigned char *address,uint32_t *length) {
+    (void)s;
+    if (!offline_sockets()) return net_unreachable();
+    if (address && length && *length>=16) { memset(address,0,16); address[0]=16; address[1]=2; *length=16; }
+    return 0;
+}
+static ABI int32_t sock_recv(void) {
+    if (!offline_sockets()) return net_unreachable();
+    net_errno=35; return NET_EAGAIN;
+}
+static ABI int32_t sock_epoll_wait(int eid,void *events,int max,int timeout_us) {
+    (void)eid; (void)events; (void)max;
+    if (!offline_sockets()) return net_unreachable();
+    const int64_t cap=50000;
+    int64_t wait = timeout_us<0 || timeout_us>cap ? cap : timeout_us;
+    if (wait>0) platform_sleep_ns((uint64_t)wait*1000);
+    return 0;
+}
 static ABI int32_t netctl_state(int32_t *state) { if (!state) return NET_CTL_INVALID_ADDR; *state=0; return 0; }
 static ABI int32_t netctl_info(int code,void *info) { (void)code; (void)info; return NET_CTL_NOT_CONNECTED; }
 static ABI int32_t netctl_register(void *cb,void *arg,int32_t *cid) { (void)cb; (void)arg; if (!cid) return NET_CTL_INVALID_ADDR; *cid=new_id(); return 0; }
@@ -667,13 +713,13 @@ static const RuntimeExport exports[]={
     {"sceNetResolverCreate",net_resolver_create}, {"sceNetResolverDestroy",net_resolver_destroy},
     {"sceNetHtons",net_htons}, {"sceNetNtohs",net_ntohs}, {"sceNetHtonl",net_htonl}, {"sceNetNtohl",net_ntohl},
     {"sceNetInetPton",net_pton}, {"sceNetInetNtop",net_ntop},
-    {"sceNetSocket",net_unreachable}, {"sceNetConnect",net_unreachable}, {"sceNetBind",net_unreachable},
+    {"sceNetSocket",sock_create}, {"sceNetConnect",net_unreachable}, {"sceNetBind",sock_ok},
     {"sceNetListen",net_unreachable}, {"sceNetAccept",net_unreachable}, {"sceNetSend",net_unreachable},
-    {"sceNetSendto",net_unreachable}, {"sceNetRecv",net_unreachable}, {"sceNetRecvfrom",net_unreachable},
-    {"sceNetSetsockopt",net_unreachable}, {"sceNetGetsockopt",net_unreachable},
-    {"sceNetGetsockname",net_unreachable}, {"sceNetShutdown",net_unreachable},
-    {"sceNetSocketClose",net_unreachable}, {"sceNetSocketAbort",net_unreachable},
-    {"sceNetEpollControl",net_unreachable}, {"sceNetEpollWait",net_unreachable}, {"sceNetEpollAbort",net_unreachable},
+    {"sceNetSendto",net_unreachable}, {"sceNetRecv",sock_recv}, {"sceNetRecvfrom",sock_recv},
+    {"sceNetSetsockopt",sock_ok}, {"sceNetGetsockopt",sock_getsockopt},
+    {"sceNetGetsockname",sock_getsockname}, {"sceNetShutdown",sock_ok},
+    {"sceNetSocketClose",sock_ok}, {"sceNetSocketAbort",sock_ok},
+    {"sceNetEpollControl",sock_ok}, {"sceNetEpollWait",sock_epoll_wait}, {"sceNetEpollAbort",sock_ok},
     {"sceNetResolverStartNtoa",net_unreachable}, {"sceNetResolverStartAton",net_unreachable},
     {"sceNetCtlGetState",netctl_state}, {"sceNetCtlGetInfo",netctl_info},
     {"sceNetCtlRegisterCallback",netctl_register}, {"sceNetCtlCheckCallback",netctl_check},

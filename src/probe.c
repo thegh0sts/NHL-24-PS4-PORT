@@ -31,6 +31,8 @@ static uint64_t import_count;
 static unsigned char *image;
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
+/* NHL 24: link_modules.py marks game-folder modules whose start code waits for sceKernelLoadStartModule. */
+#define DEFERRED_INIT (UINT64_C(1)<<62)
 static LinkedModule modules[16];
 static uint64_t module_count;
 static int entered_game;
@@ -383,7 +385,7 @@ int main(int argc, char **argv) {
             fail("invalid eboot TLS metadata");
         for (uint64_t m=0;m<module_count;++m) {
             LinkedModule *x=&modules[m];
-            if (x->base>=size || !x->size || x->size>size-x->base || x->init<x->base || x->init-x->base>=x->size ||
+            if (x->base>=size || !x->size || x->size>size-x->base || (x->init&~DEFERRED_INIT)<x->base || (x->init&~DEFERRED_INIT)-x->base>=x->size ||
                 (x->tls_module && (x->tls_address>=size || x->tls_memsz>size-x->tls_address || x->tls_memsz>1024*1024 ||
                                    x->tls_filesz>x->tls_memsz || x->tls_module<2 || x->tls_module>7)))
                 fail("invalid linked module metadata");
@@ -422,7 +424,7 @@ int main(int argc, char **argv) {
             (relocs[i].kind != 2 && relocs[i].addend) || relocs[i].addend >= page_size) fail("bad relocation");
     }
     for (uint64_t m=0;m<module_count;++m)
-        if (!mapped(segments,ns,modules[m].init,1) || (modules[m].tls_module && !mapped(segments,ns,modules[m].tls_address,modules[m].tls_memsz)))
+        if (!mapped(segments,ns,modules[m].init&~DEFERRED_INIT,1) || (modules[m].tls_module && !mapped(segments,ns,modules[m].tls_address,modules[m].tls_memsz)))
             fail("unmapped module metadata");
     if (module_count && !mapped(segments,ns,procparam,64)) fail("unmapped procparam");
     for (uint64_t i=0;i<import_count;++i) {
@@ -520,6 +522,22 @@ int main(int argc, char **argv) {
 #else
     (void)tls_loads;
 #endif
+    /* Windows: the guest red zone out of reach of exception frames (runtime_fp.c). */
+    if (runtime_redzone_enabled()) {
+        uint64_t *addresses = calloc(ns ? ns : 1, sizeof(uint64_t)), *sizes = calloc(ns ? ns : 1, sizeof(uint64_t)), *flags = calloc(ns ? ns : 1, sizeof(uint64_t));
+        uint64_t *pointers = calloc(nr ? nr : 1, sizeof(uint64_t)), pointer_count = 0;
+        if (!addresses || !sizes || !flags || !pointers) fail("allocation failed");
+        for (uint64_t i = 0; i < ns; ++i) { addresses[i] = segments[i].address; sizes[i] = segments[i].size; flags[i] = segments[i].flags; }
+        for (uint64_t i = 0; i < nr; ++i) if (!relocs[i].kind) pointers[pointer_count++] = relocs[i].value;
+        RuntimeFpStats rz;
+        const uint64_t start = platform_monotonic_ns();
+        runtime_redzone_patch_image(image, size, addresses, sizes, flags, ns, pointers, pointer_count, map_near_image, &rz);
+        printf("Red zone (BB_REDZONE_SHIFT): %" PRIu64 " of %" PRIu64 " accesses moved 64 KiB lower in %" PRIu64 " functions "
+               "(%" PRIu64 " kept, %" PRIu64 " switch-table entries seen), %" PRIu64 " KiB of stubs, %.0f ms\n",
+               rz.patched, rz.found, rz.functions, rz.unpatched, rz.displaced, rz.stub_bytes / 1024,
+               (double)(platform_monotonic_ns() - start) / 1e6);
+        free(addresses); free(sizes); free(flags); free(pointers);
+    }
     /* ufc3 online (UFC-25): approximate reciprocals that give the same bits on every CPU. */
     if (runtime_fp_deterministic()) {
         uint64_t *addresses = calloc(ns, sizeof(uint64_t)), *sizes = calloc(ns, sizeof(uint64_t)), *flags = calloc(ns, sizeof(uint64_t));
@@ -549,7 +567,7 @@ int main(int argc, char **argv) {
         for (uint64_t m=0;m<module_count;++m) {
             int init_executable=0;
             for (uint64_t i=0;i<ns;++i)
-                if ((segments[i].flags&1) && modules[m].init>=segments[i].address && modules[m].init-segments[i].address<segments[i].size) init_executable=1;
+                if ((segments[i].flags&1) && (modules[m].init&~DEFERRED_INIT)>=segments[i].address && (modules[m].init&~DEFERRED_INIT)-segments[i].address<segments[i].size) init_executable=1;
             if (!init_executable) fail("module init is not executable");
             if (modules[m].tls_module)
                 runtime_set_module_tls(modules[m].tls_module,image+modules[m].tls_address,modules[m].tls_filesz,modules[m].tls_memsz);
@@ -557,8 +575,13 @@ int main(int argc, char **argv) {
         runtime_set_main_tls(image+main_tls[0],main_tls[1],main_tls[2],main_tls[3]);
         runtime_thread_attach_main();
         runtime_set_procparam(image+procparam);
+        runtime_set_guest_image(image,size);
         /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
         for (uint64_t m=0;m<module_count;++m) {
+            if (modules[m].init&DEFERRED_INIT) {
+                printf("Linked module %" PRIu64 " at image offset 0x%" PRIx64 ": start deferred until sceKernelLoadStartModule\n",m,modules[m].base);
+                continue;
+            }
             printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n",m,modules[m].init,nb);
             typedef int (ABI *ModuleInit)(uint64_t,void *,void *);
             int result=((ModuleInit)(image+modules[m].init))(0,NULL,NULL);

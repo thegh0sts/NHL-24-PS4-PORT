@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
 #include <boost/container/small_vector.hpp>
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_copy_bounds.h"
@@ -733,8 +734,24 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
 
 void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
     if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
-        if (instance.IsMaintenance8Supported() ||
-            src->info.props.is_depth == dst->info.props.is_depth) {
+        // NHL 24: depth images of different formats (D32 and D32+S8) cannot be copied directly
+        // (Vulkan needs the same format; the GPU was lost on it): through the buffer instead.
+        const auto src_format = src->backing->image.image_ci.format;
+        const auto dst_format = dst->backing->image.image_ci.format;
+        const bool depth_formats_differ =
+            src->info.props.is_depth && dst->info.props.is_depth && src_format != dst_format &&
+            std::min(src->info.resources.levels, dst->info.resources.levels) == 1 &&
+            src->info.resources.layers == dst->info.resources.layers; // the buffer path's limits
+        if (depth_formats_differ) {
+            static bool shown;
+            if (!shown) {
+                shown = true;
+                std::printf("GPU: depth copy %s -> %s through a buffer\n",
+                            vk::to_string(src_format).c_str(), vk::to_string(dst_format).c_str());
+            }
+        }
+        if (!depth_formats_differ && (instance.IsMaintenance8Supported() ||
+            src->info.props.is_depth == dst->info.props.is_depth)) {
             CopyImage(src, dst);
         } else {
             // Perform depth from/to color copy using the intermediate copy buffer.

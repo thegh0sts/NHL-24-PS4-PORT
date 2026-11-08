@@ -19,6 +19,15 @@ from prepare import parse_self, span, unpack
 from link_libc import encode_id
 
 DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
+DEFERRED_INIT = 1 << 62  # NHL 24: start code runs at sceKernelLoadStartModule, not at boot
+
+
+def module_path(game, filename):
+    """NHL 24: a module in the game folder's root (loaded by the game at run time), else sce_module/."""
+    root = game / filename
+    if root.is_file():
+        return root, True
+    return game / 'sce_module' / filename, False
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
 
 
@@ -127,8 +136,13 @@ def link(game, out, module_names=DEFAULT_MODULES):
     base = (size + 65535) & ~65535
     fs_patched = patch_fs_loads(image, main['ph'], 0)
     tls_module = 2
+    dynamic = []
     for filename in module_names:
-        m = module(game / 'sce_module' / filename)
+        path, deferred = module_path(game, filename)
+        if not path.is_file() and filename not in DEFAULT_MODULES:
+            print(f'link_modules: {filename} is not in the game folder or sce_module/: skipped')
+            continue
+        m = module(path)
         loads = [p for p in m['ph'] if p['type'] in (1, 0x61000010)]
         modsize = max(p['vaddr'] + p['memsz'] for p in loads)
         if base + modsize > 512 * 1024 * 1024:
@@ -179,6 +193,7 @@ def link(game, out, module_names=DEFAULT_MODULES):
             else:
                 raise ValueError(f'{filename}: unsupported relocation type {kind}')
         count = 0
+        module_exports = []
         for s in m['symbols']:
             if s['section'] and s['binding'] in (1, 2) and s['identity'] and s['type'] in (1, 2):
                 if not mapped(s['value'], max(1, s['size'])):
@@ -188,9 +203,14 @@ def link(game, out, module_names=DEFAULT_MODULES):
                 entry_value = (base + s['value'], 2 if s['type'] == 1 else 1, filename)
                 exports[s['identity']] = entry_value
                 by_nid[(s['identity'][0], s['identity'][1][0])].append(entry_value)
+                module_exports.append((s['identity'][0], base + s['value']))
                 count += 1
         fs_patched += patch_fs_loads(image, m['ph'], base)
-        table.append(dict(file=filename, base=base, size=modsize, init=base + m['tags'].get(12, 0),
+        if deferred:
+            dynamic.append(dict(file=filename, init=base + m['tags'].get(12, 0), base=base, size=modsize,
+                                exports=module_exports))
+        table.append(dict(file=filename, base=base, size=modsize,
+                          init=(base + m['tags'].get(12, 0)) | (DEFERRED_INIT if deferred else 0),
                           tls_address=base + tls['vaddr'] if tls else 0, tls_memsz=tls['memsz'] if tls else 0,
                           tls_filesz=tls['filesz'] if tls else 0, tls_module=module_id,
                           tls_relocations=tls_relocations, exports=count, sha256=m['sha256']))
@@ -244,7 +264,14 @@ def link(game, out, module_names=DEFAULT_MODULES):
                   main_tls=dict(zip(('vaddr', 'filesz', 'memsz', 'align'), main_tls_values)),
                   unresolved_imports=unresolved)
     (out / 'link.json').write_text(json.dumps(report, indent=2) + '\n')
-    summary = ', '.join(f"{t['file']}@{t['base']:#x}" for t in table)
+    with (out / 'dynamic_modules.txt').open('w', newline='\n') as f:
+        for d in dynamic:
+            f.write(f"module {d['file']} {d['init']:#x} {d['base']:#x} {d['size']:#x}\n")
+            for nid_, offset in d['exports']:
+                f.write(f'export {nid_} {offset:#x}\n')
+    if dynamic:
+        print('Deferred game modules (started by the game): ' + ', '.join(d['file'] for d in dynamic))
+    summary = ', '.join(f"{t['file']}@{t['base']:#x}" for t in table)  # base addresses
     print(f'Linked modules: {summary}; {len(bindings)} native bindings, {len(unresolved)} imports left to the host runtime, '
           f'fs->gs patched={fs_patched}')
 
