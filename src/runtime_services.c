@@ -541,6 +541,36 @@ static ABI int32_t playgo_language_mask_set(int32_t handle, uint64_t mask) { (vo
 static ABI int32_t appcontent_pft_flag(int32_t *flag) { if (flag) *flag=0; return 0; }
 static ABI int32_t appcontent_download_space(const void *mount, uint64_t *kb) { (void)mount; if (kb) *kb=1024*1024; return 0; }
 
+/* NHL 24, batch 3: PSN and other services answered as an offline PS4 (see apply_nhl24_batch3.py);
+ * np_signed_out and ok_void are the runtime's own. */
+#define VIDEODEC2_NOT_SUPPORTED ((int32_t)0x811D0104)
+#define TROPHY_NO_ICON ((int32_t)0x80551609)
+#define RTC_INVALID_VALUE ((int32_t)0x80B50002)
+static ABI int32_t videodec2_unsupported(void) { return VIDEODEC2_NOT_SUPPORTED; }
+static ABI int32_t zero_int(void) { return 0; }
+static ABI int32_t rtc_parse_invalid(void) { return RTC_INVALID_VALUE; }
+/* Memory-pool statistics {pool size, max in use, current in use, reserved}: all zero. */
+static ABI int32_t pool_stats_second(int32_t id, void *stats) { (void)id; if (stats) memset(stats,0,32); return 0; }
+static ABI int32_t pool_stats_first(void *info) { if (info) memset(info,0,40); return 0; }
+static ABI int32_t trophy_no_icon(void) { return TROPHY_NO_ICON; }
+/* OrbisNpTrophyFlagArray: 128 bits; *count: the game's trophies (the ids with details). */
+static ABI int32_t trophy_unlock_state(int32_t ctx, int32_t handle, uint32_t *flags, uint32_t *count) {
+    (void)ctx; (void)handle;
+    if (!flags || !count) return TROPHY_INVALID;
+    memset(flags,0,TROPHY_MAX/8);
+    uint32_t n=0;
+    for (int id=0; id<TROPHY_MAX; ++id) {
+        if (runtime_trophy_info(id,NULL,NULL)) continue;
+        n=(uint32_t)id+1;
+        if (runtime_trophy_is_unlocked(id)) flags[id/32]|=UINT32_C(1)<<(id%32);
+    }
+    *count=n;
+    return 0;
+}
+/* Sign-in dialog: finished at once (status 3), result "cancelled" (1). */
+static ABI int32_t signin_status(void) { return 3; }
+static ABI int32_t signin_result(int32_t *result) { if (result) { memset(result,0,32); result[0]=1; } return 0; }
+
 static const RuntimeExport exports[]={
     /* UFC 3 */
     {"sceNpWebApiCreateContextA",np_signed_out}, {"sceNpWebApiCreateHandle",lib_init_id}, {"sceNpWebApiDeleteHandle",ok_void},
@@ -564,6 +594,49 @@ static const RuntimeExport exports[]={
     {"sceHttpSetResolveRetry",http_ok}, {"sceHttpSetResolveTimeOut",http_ok}, {"sceHttpSetSendTimeOut",http_ok},
     {"sceVoiceGetPortAttr",ok_void}, {"sceVoiceGetResourceInfo",ok_void}, {"sceVoiceResetPort",ok_void},
     {"sceVoiceSetBitRate",ok_void}, {"sceVoiceSetThreadsParams",ok_void},
+    {"sceNpTssCreateNpTitleCtxA",np_signed_out}, {"sceNpTssGetData",np_signed_out}, {"sceNpTusAddAndGetVariableA",np_signed_out},
+    {"sceNpTusAddAndGetVariableAVUser",np_signed_out}, {"sceNpTusAddAndGetVariableForCrossSave",np_signed_out}, {"sceNpTusAddAndGetVariableForCrossSaveVUser",np_signed_out},
+    {"sceNpTusCreateNpTitleCtxA",np_signed_out}, {"sceNpTusCreateRequest",np_signed_out}, {"sceNpTusGetDataA",np_signed_out},
+    {"sceNpTusGetDataAVUser",np_signed_out}, {"sceNpTusGetDataForCrossSave",np_signed_out}, {"sceNpTusGetDataForCrossSaveVUser",np_signed_out},
+    {"sceNpTusGetFriendsDataStatusA",np_signed_out}, {"sceNpTusGetFriendsDataStatusForCrossSave",np_signed_out}, {"sceNpTusGetFriendsVariableA",np_signed_out},
+    {"sceNpTusGetFriendsVariableForCrossSave",np_signed_out}, {"sceNpTusGetMultiSlotVariableA",np_signed_out}, {"sceNpTusGetMultiSlotVariableAVUser",np_signed_out},
+    {"sceNpTusGetMultiSlotVariableForCrossSave",np_signed_out}, {"sceNpTusGetMultiSlotVariableForCrossSaveVUser",np_signed_out}, {"sceNpTusGetMultiUserDataStatusA",np_signed_out},
+    {"sceNpTusGetMultiUserDataStatusAVUser",np_signed_out}, {"sceNpTusGetMultiUserDataStatusForCrossSave",np_signed_out}, {"sceNpTusGetMultiUserDataStatusForCrossSaveVUser",np_signed_out},
+    {"sceNpTusGetMultiUserVariableA",np_signed_out}, {"sceNpTusGetMultiUserVariableAVUser",np_signed_out}, {"sceNpTusGetMultiUserVariableForCrossSave",np_signed_out},
+    {"sceNpTusGetMultiUserVariableForCrossSaveVUser",np_signed_out}, {"sceNpTusSetDataA",np_signed_out}, {"sceNpTusSetDataAVUser",np_signed_out},
+    {"sceNpTusSetMultiSlotVariableA",np_signed_out}, {"sceNpTusSetMultiSlotVariableVUser",np_signed_out}, {"sceNpTusTryAndSetVariableA",np_signed_out},
+    {"sceNpTusTryAndSetVariableAVUser",np_signed_out}, {"sceNpTusTryAndSetVariableForCrossSave",np_signed_out}, {"sceNpTusTryAndSetVariableForCrossSaveVUser",np_signed_out},
+    {"sceNpMatching2CreateContextA",np_signed_out}, {"sceNpMatching2CreateJoinRoomA",np_signed_out}, {"sceNpMatching2GetRoomDataExternalList",np_signed_out},
+    {"sceNpMatching2GetRoomDataInternal",np_signed_out}, {"sceNpMatching2GetRoomMemberDataInternal",np_signed_out}, {"sceNpMatching2GetRoomMemberIdListLocal",np_signed_out},
+    {"sceNpMatching2GetRoomPasswordLocal",np_signed_out}, {"sceNpMatching2GetSignalingOptParamLocal",np_signed_out}, {"sceNpMatching2GetUserInfoListA",np_signed_out},
+    {"sceNpMatching2JoinRoomA",np_signed_out}, {"sceNpMatching2SendRoomChatMessage",np_signed_out}, {"sceNpMatching2SendRoomMessage",np_signed_out},
+    {"sceNpMatching2SetSignalingOptParam",np_signed_out}, {"sceNpMatching2SetUserInfo",np_signed_out}, {"sceNpMatching2SignalingGetConnectionInfoA",np_signed_out},
+    {"sceNpBandwidthTestInitStart",np_signed_out}, {"sceNpBandwidthTestGetStatus",np_signed_out}, {"sceNpWordFilterCreateRequest",np_signed_out},
+    {"sceNpWordFilterCreateTitleCtxA",np_signed_out}, {"sceNpWordFilterSanitizeComment",np_signed_out}, {"sceNpScoreCreateNpTitleCtxA",np_signed_out},
+    {"sceNpScoreGetFriendsRankingA",np_signed_out}, {"sceNpScoreGetFriendsRankingForCrossSave",np_signed_out}, {"sceNpScoreGetGameDataByAccountId",np_signed_out},
+    {"sceNpScoreGetRankingByAccountId",np_signed_out}, {"sceNpScoreGetRankingByAccountIdForCrossSave",np_signed_out}, {"sceNpScoreGetRankingByAccountIdPcId",np_signed_out},
+    {"sceNpScoreGetRankingByAccountIdPcIdForCrossSave",np_signed_out}, {"sceNpScoreGetRankingByRangeA",np_signed_out}, {"sceNpScoreGetRankingByRangeForCrossSave",np_signed_out},
+    {"sceNpGetAccountLanguageA",np_signed_out}, {"sceNpInGameMessageCreateHandle",np_signed_out}, {"sceNpInGameMessageInitialize",np_signed_out},
+    {"sceNpInGameMessagePrepareA",np_signed_out}, {"sceNpInGameMessageSendDataA",np_signed_out}, {"sceNpPartyInitialize",np_signed_out},
+    {"sceNpPartyRegisterHandlerA",np_signed_out}, {"sceNpPartyRegisterPrivateHandler",np_signed_out}, {"sceNpAuthCreateRequest",np_signed_out},
+    {"sceNpTusAbortRequest",ok_void}, {"sceNpTusDeleteMultiSlotDataA",ok_void}, {"sceNpTusDeleteMultiSlotDataVUser",ok_void},
+    {"sceNpTusDeleteNpTitleCtx",ok_void}, {"sceNpTusDeleteRequest",ok_void}, {"sceNpMatching2RegisterRoomMessageCallback",ok_void},
+    {"sceNpBandwidthTestAbort",ok_void}, {"sceNpBandwidthTestShutdown",ok_void}, {"sceNpWordFilterAbortRequest",ok_void},
+    {"sceNpWordFilterDeleteRequest",ok_void}, {"sceNpWordFilterDeleteTitleCtx",ok_void}, {"sceNpInGameMessageDeleteHandle",ok_void},
+    {"sceNpInGameMessageTerminate",ok_void}, {"sceNpPartyCheckCallback",ok_void}, {"sceNpPartyTerminate",ok_void},
+    {"sceNpPartyUnregisterPrivateHandler",ok_void}, {"sceNpTrophyAbortHandle",ok_void}, {"sceNpTrophyCaptureScreenshot",ok_void},
+    {"sceNpTrophyShowTrophyList",ok_void}, {"sceSigninDialogInitialize",ok_void}, {"sceSigninDialogOpen",ok_void},
+    {"sceSigninDialogTerminate",ok_void}, {"sceNpWebApiAddHttpRequestHeader",ok_void}, {"sceVideodec2Flush",ok_void},
+    {"sceVideodec2Reset",ok_void}, {"sceVideodec2DeleteDecoder",ok_void}, {"sceVideodec2ReleaseComputeQueue",ok_void},
+    {"sceHttpGetMemoryPoolStats",pool_stats_second}, {"sceSslGetMemoryPoolStats",pool_stats_second}, {"sceNetGetMemoryPoolStats",pool_stats_second},
+    {"sceNpWebApiGetMemoryPoolStats",pool_stats_second}, {"sceNpInGameMessageGetMemoryPoolStatistics",pool_stats_second}, {"sceNpMatching2GetMemoryInfo",pool_stats_first},
+    {"sceNpMatching2GetSslMemoryInfo",pool_stats_first}, {"sceVideodec2QueryDecoderMemoryInfo",videodec2_unsupported}, {"sceVideodec2QueryComputeMemoryInfo",videodec2_unsupported},
+    {"sceVideodec2AllocateComputeQueue",videodec2_unsupported}, {"sceVideodec2CreateDecoder",videodec2_unsupported}, {"sceVideodec2Decode",videodec2_unsupported},
+    {"sceNpTrophyGetGameIcon",trophy_no_icon}, {"sceNpTrophyGetGroupIcon",trophy_no_icon}, {"sceNpTrophyGetTrophyIcon",trophy_no_icon},
+    {"sceNpTrophyGetTrophyUnlockState",trophy_unlock_state}, {"sceAudio3dPortGetAttributesSupported",audio3d_unsupported}, {"sceAudio3dBedWrite",audio3d_unsupported},
+    {"sceSigninDialogUpdateStatus",signin_status}, {"sceSigninDialogGetResult",signin_result}, {"sceHttpCreateConnection",http_fail},
+    {"sceHttpCreateRequest2",http_fail}, {"sceSslGetPem",http_fail}, {"sceAudioInGetSilentState",zero_int},
+    {"sceAudioInIsSharedDevice",zero_int}, {"sceRtcParseDateTime",rtc_parse_invalid},
     {"sceAudio3dInitialize",audio3d_unsupported}, {"sceAudio3dPortOpen",audio3d_unsupported},
     {"sceAudio3dObjectReserve",audio3d_unsupported}, {"sceAudio3dObjectSetAttributes",audio3d_unsupported},
     {"sceAudio3dObjectUnreserve",ok_void}, {"sceAudio3dPortAdvance",audio3d_unsupported},
@@ -724,4 +797,8 @@ static const RuntimeExport exports[]={
     {"sceDiscMapIsRequestOnHDD",discmap_on_hdd}, {"sceDiscMap_8A828CAEE7EDD5E9",discmap_8a82},
     {"sceVoiceInit",ok_void}, {"sceVoiceEnd",ok_void},
 };
-uintptr_t runtime_services_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
+uintptr_t runtime_services_resolve(const char *name) {
+    /* NHL 24: libSceDiscMap 7C980FFB0AA27E7A has no name in the import list; as its 8A82 twin. */
+    if (runtime_nid_equals(name,"fJgP+wqifno")) return (uintptr_t)discmap_8a82;
+    return RUNTIME_LOOKUP(exports,name);
+}
