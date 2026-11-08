@@ -34,6 +34,15 @@ command -v glslang >/dev/null || command -v glslangValidator >/dev/null ||
 if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h || ! -d third_party/LibAtrac9/C ]]; then
     git submodule update --init --recursive
 fi
+# With core.autocrlf=true (common on Windows) the submodule is checked out with CRLF line endings
+# and the LF patch no longer applies ("patch does not apply"): check it out again with LF, once.
+fsr=gpu/third_party/fsr-vulkan
+if [[ $(git -C "$fsr" config --get core.autocrlf || true) != false ]] && grep -q $'\r' "$fsr/src/ffx_vk_fsr4_v07.c" 2>/dev/null; then
+    echo "build-msys2: $fsr has Windows line endings (core.autocrlf): checking it out again with LF"
+    git -C "$fsr" config core.autocrlf false
+    git -C "$fsr" rm -r -q --cached .
+    git -C "$fsr" reset -q --hard
+fi
 for patch in gpu/patches/fsr-vulkan/*.patch; do
     [[ -f $patch ]] || continue
     if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then

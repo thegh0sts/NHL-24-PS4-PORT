@@ -4,13 +4,13 @@
 # out/run.txt as well as the terminal.
 #
 #   bash scripts/run-msys2.sh [GAME_DIR] [extra loader arguments...]
-#   GAME_DIR: the game folder with eboot.bin (default: $BB_GAME_DIR, else ./nhl19)
+#   GAME_DIR: the game folder with eboot.bin (default: $BB_GAME_DIR, else ./nhl24)
 #   BB_SKIP_PREPARE=1   run again without preparing (after the first run)
 # Any BB_* variable set before it reaches the game (BB_LOG_UNRESOLVED=1, BB_NEO=1, ...).
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
 [[ ${MSYSTEM:-} == CLANG64 ]] || { echo "run-msys2: run this in the MSYS2 CLANG64 shell" >&2; exit 1; }
-game=${BB_GAME_DIR:-nhl19}
+game=${BB_GAME_DIR:-nhl24}
 if [[ $# -gt 0 && -d $1 ]]; then game=$1; shift; fi
 [[ -f $game/eboot.bin ]] || { echo "run-msys2: no eboot.bin in '$game' (pass the game folder, or set BB_GAME_DIR)" >&2; exit 1; }
 exe=out/windows/bin/sacredfire-game.exe
