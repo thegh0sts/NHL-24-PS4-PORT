@@ -137,7 +137,7 @@ static void region_insert(size_t at, HostRegion r) {
 }
 static void region_erase(size_t at, size_t n) { memmove(regions + at, regions + at + n, (region_count - at - n) * sizeof(*regions)); region_count -= n; }
 void platform_pool_reserve_range(uintptr_t lo, uintptr_t hi) {
-    if (region_count) return;
+    for (size_t i = 0; i < region_count; ++i) if (regions[i].start >= lo && regions[i].end <= hi) return;
     if (!VirtualAlloc2(NULL, (void *)lo, hi - lo, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, NULL, 0)) {
         MEMORY_BASIC_INFORMATION m;
         fprintf(stderr, "STOP: reserving the PS4 address range %p-%p failed (error %lu).", (void *)lo, (void *)hi, GetLastError());
@@ -146,8 +146,19 @@ void platform_pool_reserve_range(uintptr_t lo, uintptr_t hi) {
         fputs(" The game executable must be linked with --disable-high-entropy-va (docs/sacredfire/13-windows-port.md).\n", stderr);
         exit(21);
     }
-    reserve_lo = lo; reserve_hi = hi;
-    region_insert(0, (HostRegion){lo, hi, 0, 0});
+    if (!reserve_hi || lo < reserve_lo) reserve_lo = lo;
+    if (hi > reserve_hi) reserve_hi = hi;
+    region_insert(region_index(lo), (HostRegion){lo, hi, 0, 0});
+}
+/* NHL 24: a second guest range (the PS4 system-managed area below the user range), reserved
+ * like the user range; 0, or -1 when Windows already has something there. */
+int platform_pool_reserve_extra(uintptr_t lo, uintptr_t hi) {
+    for (size_t i = 0; i < region_count; ++i) if (regions[i].start >= lo && regions[i].end <= hi) return 0;
+    if (!VirtualAlloc2(NULL, (void *)lo, hi - lo, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, NULL, 0)) return -1;
+    if (!reserve_hi || lo < reserve_lo) reserve_lo = lo;
+    if (hi > reserve_hi) reserve_hi = hi;
+    region_insert(region_index(lo), (HostRegion){lo, hi, 0, 0});
+    return 0;
 }
 /* A view of the section over the placeholder of region r. 0, or -1 with the placeholder kept
  * (a bad offset or an exhausted page file: the caller reports NO_MEMORY and the range reads as

@@ -68,6 +68,8 @@ void platform_aligned_free(void *p);
 #ifdef _WIN32
 /* Reserves [lo, hi) so no host allocation lands there; call first thing in main. Exits on failure. */
 void platform_pool_reserve_range(uintptr_t lo, uintptr_t hi);
+/* A second guest range (NHL 24: the PS4 system-managed area). 0, or -1 if the host uses it. */
+int platform_pool_reserve_extra(uintptr_t lo, uintptr_t hi);
 /* Creates the section of `bytes` and a host-private view of all of it (*backing). 0 or -1. */
 int platform_pool_create(uint64_t bytes, unsigned char **backing);
 /* A view of pool offset `phys` at `address` (prot bits), or a reserved (no access, no storage)

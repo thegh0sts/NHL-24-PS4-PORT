@@ -35,7 +35,20 @@ static uint64_t pool_size_bytes(void) {
     return size;
 }
 #define POOL_SIZE pool_size_bytes()
-#define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
+/* NHL 24: flexible memory = the game's SceKernelMemParam size (runtime.c), at most the 1 GiB span
+ * the runtime keeps for it (FLEX_SPAN); 448 MiB when the game sets none. */
+extern uint64_t runtime_flexible_param;
+static uint64_t flexible_size_bytes(void) {
+    static uint64_t size;
+    if (!size) {
+        uint64_t want=runtime_flexible_param ? runtime_flexible_param : UINT64_C(448)*1024*1024;
+        size=want>(UINT64_C(1)<<30) ? (UINT64_C(1)<<30) : want;
+        printf("Runtime: flexible memory %llu MiB%s\n",(unsigned long long)(size>>20),
+               want>size ? " (the game asks for more; the runtime has room for 1 GiB)" : "");
+    }
+    return size;
+}
+#define FLEXIBLE_SIZE flexible_size_bytes()
 #define PAGE UINT64_C(16384)
 #define USER_MIN UINT64_C(0x1000000000)
 #define USER_MAX UINT64_C(0xfc00000000)
@@ -255,9 +268,21 @@ static int host_protect(uintptr_t address, uint64_t size, int prot) { return mpr
 /* Windows (platform_win.c): direct memory occupies [0,POOL_SIZE) of a pagefile-backed section,
  * flexible memory [POOL_SIZE,+FLEX_SPAN); views of it replace placeholders inside the reserved
  * PS4 user range. No dma-buf chunks: the GPU side copies, as the Deck's default model does. */
+/* NHL 24: the PS4 lets games map at fixed addresses in its system-managed area below the user
+ * range (NHL 24: GPU memory at 0x7F0000000). Reserved too, up to the runtime's own low area. */
+#define SYSTEM_MANAGED_MIN UINT64_C(0x0400000000)
+#define SYSTEM_MANAGED_MAX UINT64_C(0x0800000000)
+static void reserve_system_managed(void) {
+    static int done;
+    if (done++) return;
+    if (platform_pool_reserve_extra(SYSTEM_MANAGED_MIN,SYSTEM_MANAGED_MAX))
+        fprintf(stderr,"Runtime: the system-managed range %#" PRIx64 "-%#" PRIx64 " is in use on this PC: fixed mappings there will fail\n",
+                SYSTEM_MANAGED_MIN,SYSTEM_MANAGED_MAX);
+}
 static int pool(void) {
     if (backing_base) return 0;
     platform_pool_reserve_range(USER_MIN,USER_MAX);
+    reserve_system_managed();
     return platform_pool_create(POOL_SIZE+FLEX_SPAN,&backing_base);
 }
 static void ensure_chunks(uint64_t phys, uint64_t size) { (void)phys; (void)size; }
@@ -561,8 +586,12 @@ static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags
     write_unlock();
     flush_hooks();
     if (!result) printf("Runtime: mapped flexible memory %p, size=%" PRIu64 ", prot=0x%x\n", *inout, size, prot);
-    else fprintf(stderr,"Runtime: flexible map of %" PRIu64 " bytes failed (0x%x), in use=%" PRIu64 "\n",
-                 size, (unsigned)result, flexible_bytes);
+    else {
+        uint64_t sites[3];
+        runtime_guest_call_sites(sites);
+        fprintf(stderr,"Runtime: flexible map of %" PRIu64 " bytes failed (0x%x), in use=%" PRIu64 " from +%#" PRIx64 " < +%#" PRIx64 " < +%#" PRIx64 "\n",
+                size, (unsigned)result, flexible_bytes, sites[0], sites[1], sites[2]);
+    }
     return result;
 }
 static ABI int32_t map_flexible_named(void **inout, uint64_t size, int prot, int flags, const char *name) {
@@ -718,6 +747,8 @@ static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
 static ABI int32_t flexible_available(uint64_t *out) {
     if (!out) return INVALID;
     write_lock(); *out=FLEXIBLE_SIZE>flexible_bytes ? FLEXIBLE_SIZE-flexible_bytes : 0; write_unlock();
+    static int told; if (told++<4) { uint64_t s[3]; runtime_guest_call_sites(s);
+        printf("Runtime: available flexible memory -> %" PRIu64 " from +%#" PRIx64 " < +%#" PRIx64 "\n",*out,s[0],s[1]); }
     return 0;
 }
 static ABI int32_t flexible_configured(uint64_t *out) { if (!out) return INVALID; *out=FLEXIBLE_SIZE; return 0; }
@@ -753,7 +784,7 @@ uintptr_t runtime_memory_resolve(const char *name) {
     return RUNTIME_LOOKUP(exports,name);
 }
 #ifdef _WIN32
-void runtime_memory_reserve(void) { platform_pool_reserve_range(USER_MIN,USER_MAX); }
+void runtime_memory_reserve(void) { platform_pool_reserve_range(USER_MIN,USER_MAX); reserve_system_managed(); }
 #else
 void runtime_memory_reserve(void) {}
 #endif

@@ -525,6 +525,16 @@ static ABI int32_t http_errno(int32_t id,int32_t *err) { (void)id; if (err) *err
 /* No 3D audio port: the game keeps its stereo/5.1 output (sceAudioOut). */
 #define AUDIO3D_NOT_SUPPORTED ((int32_t)0x80EA0009)
 static ABI int32_t audio3d_unsupported(void) { return AUDIO3D_NOT_SUPPORTED; }
+/* NHL 24: the same answer, with the output values written (the game uses them even on failure). */
+static ABI int32_t audio3d_attributes_none(uint32_t port, void *caps, uint32_t *count) {
+    (void)port; (void)caps; if (count) *count=0; return AUDIO3D_NOT_SUPPORTED;
+}
+static ABI int32_t audio3d_port_open_none(int32_t user, const void *params, int32_t *port) {
+    (void)user; (void)params; if (port) *port=-1; return AUDIO3D_NOT_SUPPORTED;
+}
+static ABI int32_t audio3d_object_reserve_none(uint32_t port, uint32_t *object) {
+    (void)port; if (object) *object=UINT32_C(0xFFFFFFFF); return AUDIO3D_NOT_SUPPORTED;
+}
 
 /* NHL 19: libSceIme keyboard functions. No USB keyboard is connected (keyboard input reaches the
  * game as pad buttons through SDL), so opening it reports exactly that. */
@@ -633,12 +643,12 @@ static const RuntimeExport exports[]={
     {"sceNpMatching2GetSslMemoryInfo",pool_stats_first}, {"sceVideodec2QueryDecoderMemoryInfo",videodec2_unsupported}, {"sceVideodec2QueryComputeMemoryInfo",videodec2_unsupported},
     {"sceVideodec2AllocateComputeQueue",videodec2_unsupported}, {"sceVideodec2CreateDecoder",videodec2_unsupported}, {"sceVideodec2Decode",videodec2_unsupported},
     {"sceNpTrophyGetGameIcon",trophy_no_icon}, {"sceNpTrophyGetGroupIcon",trophy_no_icon}, {"sceNpTrophyGetTrophyIcon",trophy_no_icon},
-    {"sceNpTrophyGetTrophyUnlockState",trophy_unlock_state}, {"sceAudio3dPortGetAttributesSupported",audio3d_unsupported}, {"sceAudio3dBedWrite",audio3d_unsupported},
+    {"sceNpTrophyGetTrophyUnlockState",trophy_unlock_state}, {"sceAudio3dPortGetAttributesSupported",audio3d_attributes_none}, {"sceAudio3dBedWrite",audio3d_unsupported},
     {"sceSigninDialogUpdateStatus",signin_status}, {"sceSigninDialogGetResult",signin_result}, {"sceHttpCreateConnection",http_fail},
     {"sceHttpCreateRequest2",http_fail}, {"sceSslGetPem",http_fail}, {"sceAudioInGetSilentState",zero_int},
     {"sceAudioInIsSharedDevice",zero_int}, {"sceRtcParseDateTime",rtc_parse_invalid},
-    {"sceAudio3dInitialize",audio3d_unsupported}, {"sceAudio3dPortOpen",audio3d_unsupported},
-    {"sceAudio3dObjectReserve",audio3d_unsupported}, {"sceAudio3dObjectSetAttributes",audio3d_unsupported},
+    {"sceAudio3dInitialize",audio3d_unsupported}, {"sceAudio3dPortOpen",audio3d_port_open_none},
+    {"sceAudio3dObjectReserve",audio3d_object_reserve_none}, {"sceAudio3dObjectSetAttributes",audio3d_unsupported},
     {"sceAudio3dObjectUnreserve",ok_void}, {"sceAudio3dPortAdvance",audio3d_unsupported},
     {"sceAudio3dPortClose",ok_void}, {"sceAudio3dPortPush",audio3d_unsupported}, {"sceAudio3dTerminate",ok_void},
     {"sceVideoRecordingSetInfo",ok_void},
