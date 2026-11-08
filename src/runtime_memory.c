@@ -465,6 +465,20 @@ static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int fla
                                     uint64_t alignment, const char *name) {
     (void)name; return direct_map(out,size,prot,flags,physical,alignment);
 }
+/* sceKernelMapDirectMemory2 (newer SDKs, NHL 24): sceKernelMapDirectMemory with the memory type
+ * after the size; the type is recorded on the mapping as sceKernelMtypeprotect does. */
+static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type);
+static ABI int32_t direct_map2(void **out, uint64_t size, int type, int prot, int flags, int64_t physical,
+                               uint64_t alignment) {
+    write_lock();
+    int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
+    if (!result && type>=0) protect_locked((uintptr_t)*out,size,prot,type);
+    write_unlock();
+    flush_hooks();
+    if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x, type=%d (MapDirectMemory2)\n", *out, size, prot, type);
+    else printf("Runtime: mapping direct memory %#" PRIx64 ", size=%" PRIu64 " failed (error %#x, MapDirectMemory2)\n", (uint64_t)physical, size, (unsigned)result);
+    return result;
+}
 static int32_t unmap_locked(uintptr_t start, uint64_t size) {
     if (start%PAGE || !size) return INVALID;
     uint64_t end=start+align_up(size,PAGE);
@@ -684,7 +698,7 @@ static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
 }
 static const RuntimeExport exports[]={
     {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
-    {"sceKernelMapDirectMemory",direct_map}, {"sceKernelMapNamedDirectMemory",direct_map_named},
+    {"sceKernelMapDirectMemory",direct_map}, {"sceKernelMapDirectMemory2",direct_map2}, {"sceKernelMapNamedDirectMemory",direct_map_named},
     {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap}, {"munmap",direct_unmap},
     {"sceKernelMapFlexibleMemory",map_flexible}, {"sceKernelMapNamedFlexibleMemory",map_flexible_named},
     {"sceKernelReleaseFlexibleMemory",release_flexible}, {"sceKernelReserveVirtualRange",reserve_range},
