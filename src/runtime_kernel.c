@@ -398,7 +398,14 @@ static ABI int32_t guest_sigreturn(void) { return 0; }
 /* POSIX sockets: no network (EHOSTUNREACH as -1 with errno set by the guest's errno slot). */
 static ABI int32_t posix_no_socket(void) { return -1; }
 
+/* getargc / getargv (libkernel): the process arguments, as a PS4 starts a game: the executable alone. */
+static char kernel_arg0[]="eboot.bin";
+static char *kernel_argv[]={kernel_arg0,NULL};
+static ABI int32_t kernel_getargc(void) { return 1; }
+static ABI char **kernel_getargv(void) { return kernel_argv; }
+
 static const RuntimeExport exports[]={
+    {"getargc",kernel_getargc}, {"getargv",kernel_getargv},
     {"sceKernelIsNeoMode",is_neo_mode}, {"sceKernelGetCpumode",get_cpumode}, {"sceKernelGetCurrentCpu",get_current_cpu},
     {"sceRandomGetRandomNumber",random_number},
     {"scePthreadCondattrInit",condattr_init}, {"scePthreadCondattrDestroy",condattr_destroy},
