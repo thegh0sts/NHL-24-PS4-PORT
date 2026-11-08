@@ -408,6 +408,9 @@ static ABI char **kernel_getargv(void) { return kernel_argv; }
 static ABI int32_t kernel_sleep_seconds(uint32_t seconds) { sleep_ns((uint64_t)seconds*1000000000u); return 0; }
 static ABI int32_t kernel_is_prospero(void) { return 0; }
 
+/* NHL 24: pthread_equal (thread handles are compared as they are). */
+static ABI int32_t posix_thread_equal(const void *a, const void *b) { return a==b; }
+
 static const RuntimeExport exports[]={
     {"getargc",kernel_getargc}, {"getargv",kernel_getargv},
     {"sceKernelIsNeoMode",is_neo_mode}, {"sceKernelGetCpumode",get_cpumode}, {"sceKernelGetCurrentCpu",get_current_cpu},
@@ -432,6 +435,7 @@ static const RuntimeExport exports[]={
     {"sceKernelGetProcessTimeCounterFrequency",process_time_frequency},
     {"sceKernelReadTsc",read_tsc}, {"sceKernelGetTscFrequency",tsc_frequency},
     {"sceKernelSleep",kernel_sleep_seconds}, {"sceKernelIsProspero",kernel_is_prospero},
+    {"pthread_equal",posix_thread_equal},
     {"sceKernelUsleep",kernel_usleep}, {"usleep",posix_usleep}, {"sleep",posix_sleep},
     {"nanosleep",posix_nanosleep}, {"sceKernelNanosleep",kernel_nanosleep},
     {"sceKernelGettimezone",kernel_gettimezone}, {"gettimeofday",posix_gettimeofday},

@@ -724,10 +724,70 @@ static ABI int32_t sce_utimes(const char *p,const void *times) {
     (void)times; GuestStat st; return (int32_t)sce(do_stat(p,&st));
 }
 
+/* NHL 24: libkernel AIO, carried out synchronously at submit (see apply_nhl24_batch2.py). */
+typedef struct { int64_t value; uint32_t state; } AioResult;
+typedef struct { int64_t offset; int64_t nbyte; void *buffer; AioResult *result; int32_t fd; } AioRequest;
+typedef struct { int32_t window, delayed_limit; uint32_t split, split_size, chunk_size; } AioScheduling;
+enum { AIO_COMPLETED=3 };
+static int32_t aio_last_id;
+static ABI int32_t aio_initialize_impl(void *param, int32_t size) { (void)param; (void)size; return 0; }
+static ABI int32_t aio_initialize_param(AioScheduling *param) {
+    if (!param) return ERR(22);
+    for (int i=0; i<3; ++i) param[i]=(AioScheduling){0x20,0x20,1,0x100000,0x100000};
+    return 0;
+}
+static int32_t aio_submit(AioRequest *requests, int32_t count, int32_t *id, int write) {
+    if (!requests || count<=0 || !id) return ERR(22);
+    for (int32_t i=0; i<count; ++i) {
+        AioRequest *r=&requests[i];
+        int64_t n=write ? do_pwrite(r->fd,r->buffer,(uint64_t)r->nbyte,r->offset)
+                        : do_pread(r->fd,r->buffer,(uint64_t)r->nbyte,r->offset);
+        if (r->result) { r->result->value=sce(n); r->result->state=AIO_COMPLETED; }
+    }
+    *id=__atomic_add_fetch(&aio_last_id,1,__ATOMIC_RELAXED);
+    return 0;
+}
+static ABI int32_t aio_submit_read(AioRequest *requests, int32_t count, int32_t priority, int32_t *id) {
+    (void)priority; return aio_submit(requests,count,id,0);
+}
+static ABI int32_t aio_submit_write(AioRequest *requests, int32_t count, int32_t priority, int32_t *id) {
+    (void)priority; return aio_submit(requests,count,id,1);
+}
+static ABI int32_t aio_poll(int32_t id, int32_t *state) { (void)id; if (state) *state=AIO_COMPLETED; return 0; }
+static ABI int32_t aio_cancel(int32_t id, int32_t *state) { (void)id; if (state) *state=AIO_COMPLETED; return 0; }
+static ABI int32_t aio_delete(int32_t id, int32_t *result) { (void)id; if (result) *result=0; return 0; }
+static ABI int32_t aio_delete_many(const int32_t *ids, int32_t count, int32_t *results) {
+    (void)ids; if (results) for (int32_t i=0; i<count; ++i) results[i]=0;
+    return 0;
+}
+static ABI int32_t aio_wait_many(const int32_t *ids, int32_t count, int32_t *states, uint32_t mode, uint32_t *usec) {
+    (void)ids; (void)mode; (void)usec;
+    if (states) for (int32_t i=0; i<count; ++i) states[i]=AIO_COMPLETED;
+    return 0;
+}
+typedef struct { const void *base; uint64_t length; } GuestIovec;
+static ABI int64_t sce_writev(int fd, const GuestIovec *iov, int32_t count) {
+    if (count<0 || (count && !iov)) return ERR(22);
+    int64_t total=0;
+    for (int32_t i=0; i<count; ++i) {
+        if (!iov[i].length) continue;
+        int64_t n=do_write(fd,iov[i].base,iov[i].length);
+        if (n<0) return total ? total : sce(n);
+        total+=n;
+        if ((uint64_t)n<iov[i].length) break;
+    }
+    return total;
+}
+
 static const RuntimeExport exports[]={
     {"sceKernelOpen",sce_open}, {"open",posix_open}, {"_open",posix_open},
     {"sceKernelClose",sce_close}, {"close",posix_close}, {"_close",posix_close},
     {"sceKernelRead",sce_read}, {"read",posix_read}, {"_read",posix_read},
+    {"sceKernelAioInitializeImpl",aio_initialize_impl}, {"sceKernelAioInitializeParam",aio_initialize_param},
+    {"sceKernelAioSubmitReadCommands",aio_submit_read}, {"sceKernelAioSubmitWriteCommands",aio_submit_write},
+    {"sceKernelAioPollRequest",aio_poll}, {"sceKernelAioCancelRequest",aio_cancel},
+    {"sceKernelAioDeleteRequest",aio_delete}, {"sceKernelAioDeleteRequests",aio_delete_many},
+    {"sceKernelAioWaitRequests",aio_wait_many}, {"sceKernelWritev",sce_writev},
     {"sceKernelPread",sce_pread}, {"pread",posix_pread},
     {"sceKernelWrite",sce_write}, {"write",posix_write}, {"_write",posix_write},
     {"sceKernelPwrite",sce_pwrite}, {"pwrite",posix_pwrite},

@@ -142,7 +142,16 @@ static ABI int32_t rw_destroy(Rwlock **handle) {
     }
     pthread_mutex_unlock(&registry_lock); return error(e);
 }
+/* NHL 24: libkernel's POSIX names for the rwlocks: 0 or an errno number (the low bits of the
+ * Orbis error code) instead of the Orbis code. */
+static int32_t posix_code(int32_t r) { return r ? (int32_t)((uint32_t)r & 0xFFFFu) : 0; }
+static ABI int32_t posix_rw_read(Rwlock **r) { return posix_code(rw_read(r)); }
+static ABI int32_t posix_rw_write(Rwlock **r) { return posix_code(rw_write(r)); }
+static ABI int32_t posix_rw_unlock(Rwlock **r) { return posix_code(rw_unlock(r)); }
 uintptr_t runtime_rwlock_resolve(const char *name) {
+    if (runtime_nid_equals(name,"iGjsr1WAtI0")) return (uintptr_t)posix_rw_read;   /* pthread_rwlock_rdlock */
+    if (runtime_nid_equals(name,"sIlRvQqsN2Y")) return (uintptr_t)posix_rw_write;  /* pthread_rwlock_wrlock */
+    if (runtime_nid_equals(name,"EgmLo6EWgso")) return (uintptr_t)posix_rw_unlock; /* pthread_rwlock_unlock */
     if (runtime_nid_equals(name,"6ULAa0fq4jA#libkernel")) return (uintptr_t)rw_init;
     if (runtime_nid_equals(name,"BB+kb08Tl9A#libkernel")) return (uintptr_t)rw_destroy;
     if (runtime_nid_equals(name,"Ox9i0c7L5w0#libkernel")) return (uintptr_t)rw_read;
