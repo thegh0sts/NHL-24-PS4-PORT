@@ -696,12 +696,30 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
 static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
     return batch_map2(entries,count,processed,MAP_FIXED_FLAG);
 }
+/* NHL 24: flexible memory sizes (the 1 GiB span the runtime gives flexible memory) and
+ * sceKernelMtypeprotect (sceKernelMprotect plus the memory type). */
+static ABI int32_t flexible_available(uint64_t *out) {
+    if (!out) return INVALID;
+    write_lock(); *out=FLEX_SPAN>flexible_bytes ? FLEX_SPAN-flexible_bytes : 0; write_unlock();
+    return 0;
+}
+static ABI int32_t flexible_configured(uint64_t *out) { if (!out) return INVALID; *out=FLEX_SPAN; return 0; }
+static ABI int32_t kernel_mtypeprotect(const void *address, uint64_t size, int type, int prot) {
+    write_lock();
+    int32_t result=protect_locked((uintptr_t)address,size,prot,type);
+    write_unlock();
+    flush_hooks();
+    return result;
+}
+
 static const RuntimeExport exports[]={
     {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
     {"sceKernelMapDirectMemory",direct_map}, {"sceKernelMapDirectMemory2",direct_map2}, {"sceKernelMapNamedDirectMemory",direct_map_named},
     {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap}, {"munmap",direct_unmap},
     {"sceKernelMapFlexibleMemory",map_flexible}, {"sceKernelMapNamedFlexibleMemory",map_flexible_named},
     {"sceKernelReleaseFlexibleMemory",release_flexible}, {"sceKernelReserveVirtualRange",reserve_range},
+    {"sceKernelAvailableFlexibleMemorySize",flexible_available}, {"sceKernelConfiguredFlexibleMemorySize",flexible_configured},
+    {"sceKernelMtypeprotect",kernel_mtypeprotect},
     {"sceKernelMprotect",kernel_mprotect}, {"sceKernelQueryMemoryProtection",query_protection},
     {"sceKernelVirtualQuery",virtual_query}, {"sceKernelGetDirectMemoryType",direct_memory_type},
     {"sceKernelBatchMap",batch_map}, {"sceKernelBatchMap2",batch_map2},

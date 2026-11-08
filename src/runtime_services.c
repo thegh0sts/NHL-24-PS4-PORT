@@ -531,6 +531,16 @@ static ABI int32_t audio3d_unsupported(void) { return AUDIO3D_NOT_SUPPORTED; }
 #define IME_ERROR_NO_KEYBOARD ((int32_t)0x80BC0008)
 static ABI int32_t ime_no_keyboard(void) { return IME_ERROR_NO_KEYBOARD; }
 
+/* NHL 24 (SDK 10.50) start-up services. */
+static ABI int32_t user_initialize2(int32_t priority, uint64_t affinity) {
+    (void)priority; (void)affinity; return user_initialize(NULL);
+}
+static ABI int32_t display_safe_area(float *info) { if (!info) return -1; memset(info,0,4+128); *info=1.0f; return 0; }
+static ABI int32_t playgo_language_mask_get(int32_t handle, uint64_t *mask) { (void)handle; if (!mask) return -1; *mask=~UINT64_C(0); return 0; }
+static ABI int32_t playgo_language_mask_set(int32_t handle, uint64_t mask) { (void)handle; (void)mask; return 0; }
+static ABI int32_t appcontent_pft_flag(int32_t *flag) { if (flag) *flag=0; return 0; }
+static ABI int32_t appcontent_download_space(const void *mount, uint64_t *kb) { (void)mount; if (kb) *kb=1024*1024; return 0; }
+
 static const RuntimeExport exports[]={
     /* UFC 3 */
     {"sceNpWebApiCreateContextA",np_signed_out}, {"sceNpWebApiCreateHandle",lib_init_id}, {"sceNpWebApiDeleteHandle",ok_void},
@@ -559,6 +569,9 @@ static const RuntimeExport exports[]={
     {"sceAudio3dObjectUnreserve",ok_void}, {"sceAudio3dPortAdvance",audio3d_unsupported},
     {"sceAudio3dPortClose",ok_void}, {"sceAudio3dPortPush",audio3d_unsupported}, {"sceAudio3dTerminate",ok_void},
     {"sceVideoRecordingSetInfo",ok_void},
+    {"sceUserServiceInitialize2",user_initialize2}, {"sceSystemServiceGetDisplaySafeAreaInfo",display_safe_area},
+    {"scePlayGoGetLanguageMask",playgo_language_mask_get}, {"scePlayGoSetLanguageMask",playgo_language_mask_set},
+    {"sceAppContentGetPftFlag",appcontent_pft_flag}, {"sceAppContentDownloadDataGetAvailableSpaceKb",appcontent_download_space},
     {"sceUserServiceInitialize",user_initialize}, {"sceUserServiceTerminate",user_terminate},
     {"sceUserServiceGetInitialUser",user_initial}, {"sceUserServiceGetLoginUserIdList",user_list},
     {"sceUserServiceGetUserName",user_name}, {"sceUserServiceGetEvent",user_event},

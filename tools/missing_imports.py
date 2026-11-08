@@ -6,7 +6,7 @@ out/missing_imports.txt):
     python3 tools/missing_imports.py
 
 An import counts as provided when its name is in a runtime table (src/*.c: {"name",fn}), its NID
-is named in the runtime sources ("NID#library"), shadPS4's HLE registers its NID, or the GPU shim
+is named in the runtime sources ("NID" or "NID#library"), shadPS4's HLE registers its NID, or the GPU shim
 names it (gpu/shim). libc / libSceLibcInternal imports come from the linked libc.prx. This is an
 estimate from the sources, not the loader's own answer: a name the runtime builds at run time is
 not seen, and a provided function can still be incomplete. The STOP line remains the authority.
@@ -25,7 +25,7 @@ names, nids = set(), set()
 for f in (root / 'src').glob('*.c'):
     text = f.read_text(errors='replace')
     names.update(re.findall(r'\{\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*,', text))
-    nids.update(re.findall(r'"([A-Za-z0-9+\-]{11})#', text))
+    nids.update(re.findall(r'"([A-Za-z0-9+\-]{11})(?:#[A-Za-z0-9_]+)?"', text))  # "NID" or "NID#library"
 for f in (root / 'gpu' / 'shadps4' / 'core' / 'libraries').rglob('*.cpp'):
     nids.update(re.findall(r'LIB_FUNCTION\(\s*"([A-Za-z0-9+\-]{11})"', f.read_text(errors='replace')))
 for f in (root / 'gpu' / 'shim').rglob('*.cpp'):

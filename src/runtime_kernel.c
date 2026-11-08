@@ -404,6 +404,10 @@ static char *kernel_argv[]={kernel_arg0,NULL};
 static ABI int32_t kernel_getargc(void) { return 1; }
 static ABI char **kernel_getargv(void) { return kernel_argv; }
 
+/* NHL 24: sceKernelSleep (seconds) and sceKernelIsProspero (0: this is a PS4). */
+static ABI int32_t kernel_sleep_seconds(uint32_t seconds) { sleep_ns((uint64_t)seconds*1000000000u); return 0; }
+static ABI int32_t kernel_is_prospero(void) { return 0; }
+
 static const RuntimeExport exports[]={
     {"getargc",kernel_getargc}, {"getargv",kernel_getargv},
     {"sceKernelIsNeoMode",is_neo_mode}, {"sceKernelGetCpumode",get_cpumode}, {"sceKernelGetCurrentCpu",get_current_cpu},
@@ -427,6 +431,7 @@ static const RuntimeExport exports[]={
     {"sceKernelGetProcessTime",process_time}, {"sceKernelGetProcessTimeCounter",process_time_counter},
     {"sceKernelGetProcessTimeCounterFrequency",process_time_frequency},
     {"sceKernelReadTsc",read_tsc}, {"sceKernelGetTscFrequency",tsc_frequency},
+    {"sceKernelSleep",kernel_sleep_seconds}, {"sceKernelIsProspero",kernel_is_prospero},
     {"sceKernelUsleep",kernel_usleep}, {"usleep",posix_usleep}, {"sleep",posix_sleep},
     {"nanosleep",posix_nanosleep}, {"sceKernelNanosleep",kernel_nanosleep},
     {"sceKernelGettimezone",kernel_gettimezone}, {"gettimeofday",posix_gettimeofday},
