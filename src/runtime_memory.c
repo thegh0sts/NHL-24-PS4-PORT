@@ -412,6 +412,13 @@ static int direct_range_allocated(uint64_t phys, uint64_t size) {
     return 1;
 }
 
+/* NHL 24: memory calls that fail are reported with the game's call sites. */
+static void memory_failure(const char *call, uint64_t address, uint64_t size, int flags, int32_t result) {
+    uint64_t sites[3];
+    runtime_guest_call_sites(sites);
+    fprintf(stderr,"Runtime: %s %#" PRIx64 ", size=%" PRIu64 ", flags=0x%x failed (0x%x) from +%#" PRIx64 " < +%#" PRIx64 " < +%#" PRIx64 "\n",
+            call,address,size,flags,(unsigned)result,sites[0],sites[1],sites[2]);
+}
 static ABI uint64_t direct_size(void) { return POOL_SIZE; }
 static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
                                   uint64_t alignment, int type, int64_t *out) {
@@ -426,7 +433,9 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
     int slot = -1;
     for (int i=0; i<LIMIT; ++i) if (!blocks[i].used) { slot=i; break; }
     for (;;) {
-        if (slot<0 || start > end || size > end-start) { write_unlock(); return NO_SPACE; }
+        if (slot<0 || start > end || size > end-start) {
+            write_unlock(); memory_failure("direct allocation",(uint64_t)low,size,type,NO_SPACE); return NO_SPACE;
+        }
         int overlap = 0;
         for (int i=0; i<LIMIT; ++i) {
             Block b = blocks[i];
@@ -585,11 +594,19 @@ static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_
     if (!inout || !size || size%PAGE || !valid_alignment(alignment)) return INVALID;
     write_lock();
     if ((flags & MAP_FIXED_FLAG) && overlaps((uintptr_t)*inout,(uintptr_t)*inout+size,0)) {
-        write_unlock(); return NO_MEMORY;
+        /* NHL 24: reserve over a range in use. As on the PS4 (and shadPS4's Reserve), MAP_FIXED
+         * replaces what is there; only MAP_NO_OVERWRITE refuses. */
+        int32_t cleared=(flags & MAP_NO_OVERWRITE) ? NO_MEMORY : unmap_locked((uintptr_t)*inout,size);
+        if (cleared) {
+            write_unlock(); flush_hooks();
+            memory_failure("reserve (fixed, in use)",(uint64_t)(uintptr_t)*inout,size,flags,cleared); return cleared;
+        }
     }
     int32_t result=place(inout,size,0,flags,alignment,KIND_RESERVED,0,0);
     write_unlock();
+    flush_hooks();
     if (!result) printf("Runtime: reserved virtual range %p, size=%" PRIu64 "\n", *inout, size);
+    else memory_failure("reserve",(uint64_t)(uintptr_t)*inout,size,flags,result);
     return result;
 }
 static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {
@@ -700,15 +717,16 @@ static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
  * sceKernelMtypeprotect (sceKernelMprotect plus the memory type). */
 static ABI int32_t flexible_available(uint64_t *out) {
     if (!out) return INVALID;
-    write_lock(); *out=FLEX_SPAN>flexible_bytes ? FLEX_SPAN-flexible_bytes : 0; write_unlock();
+    write_lock(); *out=FLEXIBLE_SIZE>flexible_bytes ? FLEXIBLE_SIZE-flexible_bytes : 0; write_unlock();
     return 0;
 }
-static ABI int32_t flexible_configured(uint64_t *out) { if (!out) return INVALID; *out=FLEX_SPAN; return 0; }
+static ABI int32_t flexible_configured(uint64_t *out) { if (!out) return INVALID; *out=FLEXIBLE_SIZE; return 0; }
 static ABI int32_t kernel_mtypeprotect(const void *address, uint64_t size, int type, int prot) {
     write_lock();
     int32_t result=protect_locked((uintptr_t)address,size,prot,type);
     write_unlock();
     flush_hooks();
+    if (result) memory_failure("mtypeprotect",(uint64_t)(uintptr_t)address,size,prot,result);
     return result;
 }
 
