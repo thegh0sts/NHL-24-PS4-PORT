@@ -1,0 +1,2 @@
+# Never convert line endings (patch files and scripts must stay byte-exact).
+* -text
