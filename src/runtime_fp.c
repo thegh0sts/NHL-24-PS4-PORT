@@ -624,6 +624,10 @@ static unsigned char *emit_shifted(unsigned char *q, const unsigned char *code, 
     memcpy(q, code + after, in->length - after); /* immediates */
     return q + (in->length - after);
 }
+static int redzone_excluded(uint64_t (*exclude)[2], unsigned count, uint64_t at) {
+    for (unsigned i = 0; i < count; ++i) if (at >= exclude[i][0] && at < exclude[i][1]) return 1;
+    return 0;
+}
 /* Entries of a switch table (int32 offsets from the table) that land in [start, end). */
 static uint64_t mark_jump_table(Scan *c, uint64_t size, uint64_t table, uint64_t start, uint64_t end) {
     uint64_t n = 0;
@@ -655,8 +659,35 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
         for (uint64_t g = 0; g < segments; ++g)
             if (seg_flags[g] & 1) ranges[range_count++] = (Range){seg_address[g], seg_address[g] + seg_size[g]};
     } else stats->functions = range_count;
+    /* BB_REDZONE_RANGE=<from>-<to> (hex image offsets): only accesses in [from, to). */
+    uint64_t range_from = 0, range_to = UINT64_MAX;
+    if (getenv("BB_REDZONE_RANGE")) {
+        char *rest = NULL;
+        range_from = strtoull(getenv("BB_REDZONE_RANGE"), &rest, 16);
+        if (rest && *rest == '-') range_to = strtoull(rest + 1, NULL, 16);
+        printf("Red zone: only accesses at image offsets 0x%" PRIx64 "-0x%" PRIx64 " (BB_REDZONE_RANGE)\n", range_from, range_to);
+    }
+    /* BB_REDZONE_EXCLUDE=<from>-<to>[,<from>-<to>...] (hex image offsets): accesses there are left alone. */
+    uint64_t exclude[16][2];
+    unsigned exclude_count = 0;
+    for (const char *e = getenv("BB_REDZONE_EXCLUDE"); e && *e && exclude_count < 16;) {
+        char *rest = NULL;
+        exclude[exclude_count][0] = strtoull(e, &rest, 16);
+        if (!rest || *rest != '-') break;
+        exclude[exclude_count][1] = strtoull(rest + 1, &rest, 16);
+        printf("Red zone: accesses at image offsets 0x%" PRIx64 "-0x%" PRIx64 " left alone (BB_REDZONE_EXCLUDE)\n",
+               exclude[exclude_count][0], exclude[exclude_count][1]);
+        ++exclude_count;
+        e = rest && *rest == ',' ? rest + 1 : "";
+    }
+#define REDZONE_WANTED(x) ((x) >= range_from && (x) < range_to && !redzone_excluded(exclude, exclude_count, (x)))
+    /* Functions whose red zone is not used the compiler way are left alone (BB_REDZONE_ALL=1: not). */
+    const int all_functions = getenv("BB_REDZONE_ALL") && getenv("BB_REDZONE_ALL")[0] == '1';
+    uint64_t skipped_accesses = 0, skipped_functions = 0;
     /* Pass 1: the sites, direct targets and switch-table entries. */
     for (uint64_t r = 0; r < range_count; ++r) {
+        const uint64_t function_first = count;
+        int used = 0, unusual = 0;
         for (uint64_t at = ranges[r].start, end = ranges[r].end; at < end;) {
             ZydisDecodedInstruction in;
             ZydisDecodedOperand op[ZYDIS_MAX_OPERAND_COUNT];
@@ -668,28 +699,60 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
                 mark(&c, addressed, size);
                 if (in.mnemonic == ZYDIS_MNEMONIC_LEA) stats->displaced += mark_jump_table(&c, size, addressed, ranges[r].start, ranges[r].end);
             }
-            if (redzone_site(&in, op, image + at)) {
+            if (REDZONE_WANTED(at) && redzone_site(&in, op, image + at)) {
                 if (count == capacity) {
                     uint64_t *grown = realloc(sites, (capacity = capacity ? capacity * 2 : 65536) * 2 * sizeof(*sites));
                     if (!grown) { free(sites); free(ranges); free(c.targets); return 0; }
                     sites = grown;
                 }
                 sites[2 * count] = at; sites[2 * count++ + 1] = end;
+                used = 1;
             }
+            if (in.meta.category == ZYDIS_CATEGORY_CALL) unusual = 1;
+            /* pop, ret and add rsp, imm (a frame released on the way out) are the compiler's own */
+            else if (used && in.mnemonic != ZYDIS_MNEMONIC_POP && in.meta.category != ZYDIS_CATEGORY_RET &&
+                     !(in.mnemonic == ZYDIS_MNEMONIC_ADD && op[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                       op[0].reg.value == ZYDIS_REGISTER_RSP && op[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE))
+                for (unsigned i = 0; i < in.operand_count; ++i)
+                    if (op[i].type == ZYDIS_OPERAND_TYPE_REGISTER && (op[i].actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+                        (op[i].reg.value == ZYDIS_REGISTER_RSP || op[i].reg.value == ZYDIS_REGISTER_ESP || op[i].reg.value == ZYDIS_REGISTER_SP))
+                        unusual = 1;
             at = next;
+        }
+        if (unusual && !all_functions && count > function_first && range_count && stats->functions) {
+            skipped_accesses += count - function_first;
+            ++skipped_functions;
+            count = function_first;
         }
     }
     free(ranges);
+    if (skipped_functions)
+        printf("Red zone: %" PRIu64 " accesses in %" PRIu64 " functions left alone (a call, or rsp moved after the red zone is used)\n",
+               skipped_accesses, skipped_functions);
     stats->found = count;
     const size_t area_size = (size_t)count * REDZONE_STUB;
     unsigned char *area = count ? map_near(area_size) : NULL;
     if (!area) { stats->unpatched = count; free(sites); free(c.targets); return 0; }
     unsigned char *p = area;
     uint64_t covered_until = 0;
+    /* A function's red-zone accesses move together or not at all: if one of them cannot be
+     * rewritten (the next instructions cannot move), a write moved 64 KiB lower and a read left
+     * in place no longer meet (NHL 20: FUN_00710920 read [rsp-0x20] from where nothing had been
+     * written, and SimThread crashed on a wild index). So a dry run first finds the functions
+     * with such an access (their sites carry the function's end), and those are left alone. */
+    uint64_t *bad_ends = NULL, bad_count = 0, bad_capacity = 0, bad_sites = 0;
+    for (int dry = 1; dry >= 0; --dry) {
+    p = area;
+    covered_until = 0;
     /* Pass 2: a stub per site, with the instructions it displaces. */
     for (uint64_t i = 0; i < count; ++i) {
         const uint64_t at = sites[2 * i], end = sites[2 * i + 1];
-        if (at < covered_until) { ++stats->patched; continue; } /* rewritten inside the previous stub */
+        if (!dry) {
+            int bad = 0;
+            for (uint64_t b = 0; b < bad_count && !bad; ++b) bad = bad_ends[b] == end;
+            if (bad) { ++bad_sites; continue; }
+        }
+        if (at < covered_until) { if (!dry) ++stats->patched; continue; } /* rewritten inside the previous stub */
         unsigned char *stub = p, *q = p;
         uint64_t length = 0;
         int ok = 1;
@@ -699,7 +762,8 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
             const uint64_t here = at + length;
             if (here >= end || (length && is_target(&c, here)) || (size_t)(q - stub) > REDZONE_STUB - 40 ||
                 !ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, image + here, end - here, &in, op))) { ok = 0; break; }
-            if (redzone_site(&in, op, image + here)) q = emit_shifted(q, image + here, &in);
+            if (REDZONE_WANTED(here) && redzone_site(&in, op, image + here)) q = emit_shifted(q, image + here, &in);
+            else if (redzone_site(&in, op, image + here)) ok = 0; /* outside the range: stays where it is */
             else if (length && length + in.length >= JMP && relative_jump(&in)) {
                 const unsigned char *target = image + here + in.length + in.raw.imm[0].value.s;
                 if (in.opcode == 0xeb || in.opcode == 0xe9) *q++ = 0xe9;
@@ -726,17 +790,38 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
             ok = rel32(q + 5, image + at + length, &back) && rel32(image + at + JMP, stub, &to_stub);
         }
         if (!ok) {
-            if (stats->unpatched++ < 8) printf("Red zone: the access at image offset 0x%" PRIx64 " is kept (the next instructions cannot move)\n", at);
+            if (!dry) { /* only without function ranges (segments as one range): just this access stays */
+                if (stats->unpatched++ < 8) printf("Red zone: the access at image offset 0x%" PRIx64 " is kept (the next instructions cannot move)\n", at);
+            } else if (stats->functions) {
+                if (!bad_count || bad_ends[bad_count - 1] != end) {
+                    if (bad_count == bad_capacity) {
+                        uint64_t *grown = realloc(bad_ends, (bad_capacity = bad_capacity ? bad_capacity * 2 : 64) * sizeof(*bad_ends));
+                        if (!grown) { free(bad_ends); free(sites); free(c.targets); return 0; }
+                        bad_ends = grown;
+                    }
+                    bad_ends[bad_count++] = end;
+                    if (bad_count <= 8)
+                        printf("Red zone: the access at image offset 0x%" PRIx64 " cannot move (the next instructions cannot move): "
+                               "its function is left alone\n", at);
+                }
+            }
             continue;
         }
         memcpy(q + 1, &back, 4);
         p = q + 5;
+        covered_until = at + length;
+        if (dry) continue;
         image[at] = 0xe9;
         memcpy(image + at + 1, &to_stub, 4);
         memset(image + at + JMP, 0xcc, length - JMP);
         ++stats->patched;
-        covered_until = at + length;
     }
+    }
+    stats->unpatched += bad_sites;
+    if (bad_count)
+        printf("Red zone: %" PRIu64 " accesses in %" PRIu64 " functions left alone (one of their accesses cannot move)\n",
+               bad_sites, bad_count);
+    free(bad_ends);
     stats->stub_bytes = (uint64_t)(p - area);
     if (platform_protect(area, area_size, PROT_READ | PROT_EXEC)) {
         fputs("STOP: red zone: cannot make the stubs executable\n", stderr);
