@@ -976,6 +976,38 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             download_end = std::min(download_end,
                                     Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE));
         }
+        // nhl24: a CPU *read* likewise downloads only the pages it touches while the GPU still
+        // has writes in flight elsewhere in the window. The emulator's own reads of NHL 24's
+        // per-draw constant ring (~100 a second, 512 KB windows with 16-byte GPU writes between
+        // the constants) waited ~5 ms a frame for unrelated GPU work: uneven frame times, and
+        // the game's dynamic resolution kept changing (BB_READBACK_LOG, 2026-11-18). With no
+        // write in flight the whole window is still taken, as before.
+        // Off by default since 2026-11-18: with it, team select dimmed for single frames (the
+        // game read lighting data before the GPU had written it). BB_READBACK_READ_WINDOW=0
+        // turns the narrowing on for testing.
+        static const bool read_window = [] {
+            const char* e = std::getenv("BB_READBACK_READ_WINDOW");
+            return !(e && e[0] == '0');
+        }();
+        if (!is_write && !read_window) {
+            u64 window_tick = 0;
+            boost::container::small_vector<std::pair<VAddr, VAddr>, 16> gpu_runs;
+            {
+                std::shared_lock rl{gpu_ranges_mutex};
+                gpu_modified_ranges.ForEachInRange(
+                    download_start, download_end - download_start,
+                    [&](VAddr start, VAddr end) { gpu_runs.emplace_back(start, end); });
+            }
+            for (const auto& [start, end] : gpu_runs) {
+                window_tick = std::max(window_tick, WriteTicks().Newest(start, end - start));
+            }
+            if (window_tick != 0 && !scheduler.IsFree(window_tick)) {
+                download_start = std::max(download_start,
+                                          Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE));
+                download_end = std::min(download_end,
+                                        Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE));
+            }
+        }
         bool skip_download = false;
         if (is_write && !TwinsEnabled() && SkipNoOverlapEnabled()) {
             // Only pages where the GPU wrote a few bytes (labels, counters): pages full of GPU
@@ -3195,7 +3227,18 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
             // ufc3 (PS4 Pro mode): the colour targets are kept expanded on the host, so the
             // guest reading their CMask sees every tile as uncompressed (4 bits of 0xf per tile),
             // as HTile above.
-            runtime.FillBuffer(arena, arena->Offset(device_addr), size, 0xFFFFFFFFu);
+            // nhl24 (from HajDEO's nhl24pc): NHL 24 reads colour CMASK surfaces from compute
+            // shaders (its UI coverage mask). While the target is still fast-cleared every tile
+            // reads 0x0 ("cleared"), otherwise 0xF, mirroring the tracked state. Off by default
+            // since 2026-11-18: the cleared state could be stale and team select dimmed for single
+            // frames, while the player edges stay clean without it. BB_CMASK_FULL=0 turns it on.
+            static const bool always_full = [] {
+                const char* env = std::getenv("BB_CMASK_FULL");
+                return !(env && env[0] == '0');
+            }();
+            const bool cleared = !always_full && texture_cache.IsMetaCleared(device_addr, 0);
+            runtime.FillBuffer(arena, arena->Offset(device_addr), size,
+                               cleared ? 0u : 0xFFFFFFFFu);
             return true;
         } else {
             LOG_WARNING(Render_Vulkan, "Unhandled metadata type {}", magic_enum::enum_name(*type));
@@ -3217,9 +3260,24 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
     // copy below changes image state, so the helper finishes first.
     runtime.BeforeImageAccess();
     Image& image = texture_cache.GetImage(image_id);
-    ASSERT_MSG(device_addr == image.info.guest_address,
-               "Texel buffer aliases image subresources {:x} : {:x}", device_addr,
-               image.info.guest_address);
+    // nhl24 (R6 from HajDEO's nhl24pc, after torpedatorpeda's Be a Pro patches): the lookup works
+    // in 256-byte buckets, so a neighbouring texel buffer can hit an image it does not touch
+    // (nothing to sync), and a texel buffer may start inside an image (Be a Pro): the whole image
+    // is then written to its own address, which the arena must hold. Was an ASSERT (a crash).
+    const VAddr image_addr = image.info.guest_address;
+    const VAddr image_end = image_addr + image.info.guest_size;
+    if (device_addr < image_addr || device_addr >= image_end) {
+        return false;
+    }
+    if (device_addr != image_addr) {
+        if (image_addr < arena->cpu_addr ||
+            image_end > arena->cpu_addr + arena->size_bytes) {
+            return false;
+        }
+        EnsureResident(arena, image_addr >> block_shift, (image_end - 1) >> block_shift);
+        size = u32(std::min<u64>(image.info.guest_size, 0xFFFFFFFFull));
+        device_addr = image_addr;
+    }
     const u64 arena_offset = arena->Offset(device_addr);
     boost::container::small_vector<vk::BufferImageCopy, 8> buffer_copies;
     for (u32 mip = 0; mip < image.info.resources.levels; mip++) {

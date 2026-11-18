@@ -807,7 +807,7 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     wchar_t eboot[PATHW]; join(eboot, PATHW, game, L"eboot.bin");
     if (!game[0] || !exists(eboot)) {
         wchar_t m[PATHW + 128];
-        _snwprintf(m, PATHW + 128, L"No eboot.bin in \"%ls\": choose the game folder (CUSA11126, with CUSA11126-patch beside it or merged in).", game);
+        _snwprintf(m, PATHW + 128, L"No eboot.bin in \"%ls\": choose the game folder (CUSA37933, with CUSA37933-patch beside it or merged in).", game);
         m[PATHW + 127] = 0; fail(m); return 2;
     }
     /* Base and update side by side (CUSA11126 + CUSA11126-patch, as PKG extractors leave them):
@@ -837,12 +837,12 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
             logf("%s", profile);
             fail(strstr(profile, "missing or damaged")
                  ? L"The game check failed (see the log): some game files are missing or damaged. Extract the game and the 1.60 update again."
-                 : L"The game check failed (see the log): the folder is not NHL 19 CUSA11126 with the 1.60 update (CUSA11126-patch) beside it or merged in.");
+                 : L"The game check failed (see the log): the folder is not NHL 24 CUSA37933 with the 1.60 update (CUSA37933-patch) beside it or merged in.");
             return 2;
         }
         trim(profile);
     }
-    if (!profile[0]) snprintf(profile, sizeof(profile), "nhl19");
+    if (!profile[0]) snprintf(profile, sizeof(profile), "nhl24");
     /* The update's build (5.05, 6.72+ or ?): the address-keyed diagnostics know the 5.05 build only. */
     {
         char variant[64] = "?";
@@ -859,8 +859,17 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     const wchar_t *prepare[] = {game, L"--out", out};
     if (script(L"scripts", L"prepare.py", prepare, 3, NULL, 0)) { fail(L"prepare.py failed (see the log)"); return 2; }
     if (script(L"scripts", L"link_libc.py", prepare, 3, NULL, 0)) { fail(L"link_libc.py failed (see the log)"); return 2; }
-    const wchar_t *link_args[] = {game, L"--out", out, L"--modules", L"libc.prx", L"libSceFios2.prx"};
-    if (script(L"scripts", L"link_modules.py", link_args, 6, NULL, 0)) { fail(L"link_modules.py failed (see the log)"); return 2; }
+    /* NHL 24: also the PSN toolkit and the Frostbite renderer modules (game_check.py's list for the
+     * profile, as scripts/run-msys2.sh links them); the game starts the renderer ones itself
+     * (BB_DYNAMIC_MODULES below). */
+    const int nhl24 = !strcmp(profile, "nhl24");
+    const wchar_t *link_args[] = {game, L"--out", out, L"--modules", L"libc.prx", L"libSceFios2.prx",
+                                  L"libSceNpToolkit2.prx", L"Engine.Render.Core2.PlatformPs4.prx", L"Engine.BuildInfo.prx"};
+    if (script(L"scripts", L"link_modules.py", link_args, nhl24 ? 9 : 6, NULL, 0)) { fail(L"link_modules.py failed (see the log)"); return 2; }
+    {
+        wchar_t dynamic_list[PATHW]; join(dynamic_list, PATHW, out, L"dynamic_modules.txt");
+        if (nhl24 && exists(dynamic_list)) game_env(L"BB_DYNAMIC_MODULES", dynamic_list);
+    }
     wchar_t aerolib[PATHW]; join(aerolib, PATHW, root, L"share\\aerolib.inl");
     const wchar_t *names_args[] = {L"--out", out, L"--aerolib", aerolib};
     if (script(L"tools", L"gen_import_names.py", names_args, 4, NULL, 0)) { fail(L"gen_import_names.py failed (see the log)"); return 2; }
@@ -882,7 +891,7 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     const wchar_t *patches_dir_used = given_env(L"BB_PATCHES_DIR") ? given_env(L"BB_PATCHES_DIR") : patches_dir;
     const wchar_t *patches_config_used = given_env(L"BB_PATCHES_CONFIG") ? given_env(L"BB_PATCHES_CONFIG") : patches_config;
     const wchar_t *patch_args[] = {L"--patches-dir", patches_dir_used, L"--patches-config", patches_config_used,
-                                   L"--app-version", L"01.60", L"--title-id", L"CUSA11126", L"--out", out, L"--settings", config};
+                                   L"--app-version", L"01.60", L"--title-id", nhl24 ? L"CUSA37933" : L"CUSA11126", L"--out", out, L"--settings", config};
     if (script(L"scripts", L"patches.py", patch_args, 12, NULL, 0)) { fail(L"patches.py failed (see the log)"); return 2; }
     /* The count of guest TCB loads the linker rewrote (link.json fs_loads_patched): the game
      * executable cross-checks its own scan against it. */
@@ -928,7 +937,9 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
         fail(L"BB_ONLINE_SERVER differs from the selected Host address. Remove the environment override or select that same local IP."); return 2;
     }
     (void)online;
-    game_env(L"BB_ONLINE_SERVER", L"127.0.0.1");
+    /* NHL 24: offline (with the network mode it goes down the PSN toolkit path and stops at an
+     * unsupported libSceNpToolkit2 call); BB_ONLINE_SERVER set before the launcher still wins. */
+    if (!nhl24) game_env(L"BB_ONLINE_SERVER", L"127.0.0.1");
     /* The fight scene renders black without precise readbacks of linear images (shadPS4 issue
      * #4375, UFC 4, same engine); precise readbacks deadlock against the GPU write twins, so
      * those stay off. The game asks for flip rate 1 (30 Hz); its simulation follows the real
@@ -962,6 +973,13 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     SetEnvironmentVariableW(L"BB_WRITE_WINDOW_DIAG_MAX", L"1000");
 #endif
     game_env(L"BB_COPY_GPU_BUFFERS", NULL); /* NHL 19: the runtime default, as tested */
+    if (nhl24) {
+        /* NHL 24 (scripts/run-msys2.sh): the PS4's floating-point mode (else the GPU is lost at the
+         * first screens), precise readbacks (BB_READBACKS=2, the tested setting), 60 FPS
+         * (BB_FLIP_RATE=0; the game asks for 30). Each can be overridden from the environment. */
+        game_env(L"BB_DETERMINISTIC_FP", L"1");
+        game_env(L"BB_READBACKS", L"2");
+    }
 #ifdef UFC3_DIAGNOSTIC_PACKAGE
     /* The diagnostic variant (UFC-42) runs the write windows with their audit, forced, as the
      * .cmd of the diagnostic package did. */
@@ -986,21 +1004,21 @@ static DWORD play_impl(const wchar_t *const *extra, int extra_count) {
     SetEnvironmentVariableW(L"BB_UFFD", L"0");            /* Linux only */
     SetEnvironmentVariableW(L"BB_GUEST_IN_PLACE", L"0");  /* dma-buf memory model: Linux only */
     /* env_or keeps 8 values at a time: two lines. */
-    logw(L"NHL 19: output %lsx%ls, frame limit %ls (0: none), present mode %ls, fullscreen %ls\n",
+    logw(L"NHL 24: output %lsx%ls, frame limit %ls (0: none), present mode %ls, fullscreen %ls\n",
          env_or(L"BB_INTERNAL_WIDTH", L"?"), env_or(L"BB_INTERNAL_HEIGHT", L"?"), env_or(L"BB_FPS_LIMIT", L"?"),
          env_or(L"BB_PRESENT_MODE", L"?"), env_or(L"BB_FULLSCREEN", L"0"));
-    logw(L"NHL 19: player name \"%ls\", language %ls (BB_LANGUAGE)\n", env_or(L"BB_USER_NAME", L"Player 1"), env_or(L"BB_LANGUAGE", L"1"));
+    logw(L"NHL 24: player name \"%ls\", language %ls (BB_LANGUAGE)\n", env_or(L"BB_USER_NAME", L"Player 1"), env_or(L"BB_LANGUAGE", L"1"));
     {
         const wchar_t *server = env_or(L"BB_ONLINE_SERVER", L"");
-        if (server[0]) logw(L"NHL 19: online server %ls (BB_ONLINE_SERVER)\n", server); else logw(L"NHL 19: offline (no BB_ONLINE_SERVER)\n");
+        if (server[0]) logw(L"NHL 24: online server %ls (BB_ONLINE_SERVER)\n", server); else logw(L"NHL 24: offline (no BB_ONLINE_SERVER)\n");
     }
     if (experiment)
         logw(L"4K/2K experimental: in game choose VIDEO -> Favor Resolution (the scene grows only with it). %ls scene, PS4 Pro %ls, "
              L"patches %ls\n", resolution_names[settings.resolution], env_or(L"BB_NEO", L"?"), patches_dir_used);
-    logw(L"NHL 19: window %ls, FSR 1.0 %ls, RCAS %ls (attenuation %ls), readbacks %ls (2 = precise)\n",
+    logw(L"NHL 24: window %ls, FSR 1.0 %ls, RCAS %ls (attenuation %ls), readbacks %ls (2 = precise)\n",
          env_or(L"BB_WINDOW_SIZE", L"= output"), env_or(L"BB_FSR1", L"0"), env_or(L"BB_RCAS", L"?"), env_or(L"BB_RCAS_ATTENUATION", L"?"), env_or(L"BB_READBACKS", L"?"));
     if (settings.clear_cache || !wcscmp(env_or(L"BB_CLEAR_SHADER_CACHE", L"0"), L"1")) {
-        wchar_t cache[PATHW]; join(cache, PATHW, env_or(L"BB_USER_DIR", user_dir), L"cache\\CUSA11126");
+        wchar_t cache[PATHW]; join(cache, PATHW, env_or(L"BB_USER_DIR", user_dir), L"cache\\CUSA37933");
         if (exists(cache)) {
             wchar_t command[PATHW + 64]; _snwprintf(command, PATHW + 64, L"cmd.exe /c rd /s /q \"%ls\"", cache); command[PATHW + 63] = 0;
             run(command, NULL, 0, 0, INFINITE);
@@ -1369,9 +1387,9 @@ static void paint_window(HDC dc, RECT client) {
     }
     RECT t = {text_x, sx(26), client.right - sx(16), sx(66)};
     SelectObject(dc, font_title); SetTextColor(dc, C_GOLD);
-    DrawTextW(dc, L"NHL 19 \x2014 native PC port", -1, &t, DT_SINGLELINE | DT_LEFT | DT_BOTTOM | DT_NOPREFIX | DT_END_ELLIPSIS);
+    DrawTextW(dc, L"NHL 24 \x2014 native PC port", -1, &t, DT_SINGLELINE | DT_LEFT | DT_BOTTOM | DT_NOPREFIX | DT_END_ELLIPSIS);
     char version[256]; read_version(version, sizeof(version));
-    wchar_t line[160]; _snwprintf(line, 160, L"PS4 CUSA11126 \x00B7 SacredFire %hs \x00B7 your own game dump required", version); line[159] = 0;
+    wchar_t line[160]; _snwprintf(line, 160, L"PS4 CUSA37933 \x00B7 SacredFire %hs \x00B7 your own game dump required", version); line[159] = 0;
     t.top = sx(70); t.bottom = sx(90);
     SelectObject(dc, ui_font); SetTextColor(dc, C_TEXT_DIM);
     DrawTextW(dc, line, -1, &t, DT_SINGLELINE | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -1651,7 +1669,7 @@ static void controls_open(void) {
     static int registered;
     if (!registered) {
         WNDCLASSW wc = {.lpfnWndProc = ctl_proc, .hInstance = GetModuleHandleW(NULL), .hCursor = LoadCursorW(NULL, IDC_ARROW),
-                        .hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1), .lpszClassName = L"NHL19NativeControls"};
+                        .hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1), .lpszClassName = L"NHL24NativeControls"};
         RegisterClassW(&wc);
         registered = 1;
     }
@@ -1659,7 +1677,7 @@ static void controls_open(void) {
     const int rows_h = 26, top = 40, client_w = 640, client_h = top + CTL_INPUTS * rows_h + 56;
     RECT r = {0, 0, sx(client_w), sx(client_h)};
     AdjustWindowRect(&r, WS_CAPTION | WS_SYSMENU, FALSE);
-    ctl_window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"NHL19NativeControls", L"Controls", WS_CAPTION | WS_SYSMENU | WS_POPUP,
+    ctl_window = CreateWindowExW(WS_EX_DLGMODALFRAME, L"NHL24NativeControls", L"Controls", WS_CAPTION | WS_SYSMENU | WS_POPUP,
                                  CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, main_window, NULL,
                                  GetModuleHandleW(NULL), NULL);
     if (!ctl_window) return;
@@ -1895,7 +1913,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         else if (id == ID_MODE && code == CBN_SELCHANGE) online_controls();
         else if (id == ID_HOSTSCAN && !running) fill_host_addresses();
         else if (id == ID_COPYHOST) copy_host_address();
-        else if (id == ID_BROWSE) { wchar_t folder[PATHW]; if (pick_folder(L"The game folder (CUSA11126; CUSA11126-patch beside it is merged automatically)", folder)) {
+        else if (id == ID_BROWSE) { wchar_t folder[PATHW]; if (pick_folder(L"The game folder (CUSA37933; CUSA37933-patch beside it is merged automatically)", folder)) {
             SetWindowTextW(control(ID_GAME), folder);
             banner_load(folder); RECT banner = {0, 0, sx(CLIENT_W), sx(BANNER_H)}; InvalidateRect(window, &banner, FALSE);
         } }
@@ -2010,18 +2028,18 @@ static int gui(HINSTANCE instance, const wchar_t *const *extra, int extra_count)
     brush_background = CreateSolidBrush(C_BACKGROUND); brush_panel = CreateSolidBrush(C_PANEL);
     brush_input = CreateSolidBrush(C_INPUT); brush_log = CreateSolidBrush(C_LOG);
     WNDCLASSW wc = {.lpfnWndProc = window_proc, .hInstance = instance, .hCursor = LoadCursorW(NULL, IDC_ARROW),
-                    .hbrBackground = brush_background, .lpszClassName = L"NHL19NativeLauncher", .hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1))};
+                    .hbrBackground = brush_background, .lpszClassName = L"NHL24NativeLauncher", .hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1))};
     RegisterClassW(&wc);
     const DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN;
     /* The client area is CLIENT_W x CLIENT_H at 96 DPI: the window is created, measured, and
      * resized by the difference (the frame metrics of the running system, whatever they are). */
     const int client_w = sx(CLIENT_W), client_h = sx(CLIENT_H);
 #if defined(UFC3_WRITE_WINDOWS_TEST)
-    const wchar_t *window_title = L"NHL 19 - native PC port (UFC-48 write windows test)";
+    const wchar_t *window_title = L"NHL 24 - native PC port (UFC-48 write windows test)";
 #elif defined(UFC3_DIAGNOSTIC_PACKAGE)
-    const wchar_t *window_title = L"NHL 19 - native PC port (Windows diagnostic test)";
+    const wchar_t *window_title = L"NHL 24 - native PC port (Windows diagnostic test)";
 #else
-    const wchar_t *window_title = L"NHL 19 - native PC port";
+    const wchar_t *window_title = L"NHL 24 - native PC port";
 #endif
     main_window = CreateWindowExW(0, wc.lpszClassName, window_title, style, CW_USEDEFAULT, CW_USEDEFAULT, client_w + 16, client_h + 64,
                                   NULL, NULL, instance, NULL);
@@ -2073,7 +2091,7 @@ static int gui(HINSTANCE instance, const wchar_t *const *extra, int extra_count)
     }
     /* GAME (left column; content x 28..430) */
     int y = 134 + 34;
-    label(L"Game folder (CUSA11126, with CUSA11126-patch beside it)", 28, y, 402); y += 26;
+    label(L"Game folder (CUSA37933, with CUSA37933-patch beside it)", 28, y, 402); y += 26;
     edit(settings.game, 28, y, 306, ID_GAME);
     button(L"Browse...", 342, y, 88, 24, ID_BROWSE); y += 32;
     label(L"Player name", 28, y, 118);
@@ -2208,7 +2226,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
     else {
         PWSTR local = NULL;
         if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local))) { fail(L"no %LOCALAPPDATA%"); return 2; }
-        join(data, PATHW, local, L"NHL19Native"); CoTaskMemFree(local);
+        join(data, PATHW, local, L"NHL24Native"); CoTaskMemFree(local);
     }
 #endif
     ensure_directory(data);

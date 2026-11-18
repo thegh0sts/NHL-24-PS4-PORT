@@ -59,6 +59,14 @@ struct Profile {
     bool sanitize_nan_outputs{};
     bool flatten_compute_workgroups{};
     bool lds_divergent_barriers{};
+    // bbport: host subgroups narrower than a GCN wave (NVIDIA: 32) split each wave, so compute
+    // workgroups wider than the host subgroup get workgroup barriers between shared memory
+    // accesses (HajDEO's nhl24pc, R11 from torpedatorpeda's NHL24-Be-a-Pro).
+    bool lds_split_wave_barriers{};
+    // nhl24 (from HajDEO's nhl24pc): GCN discards primitives whose position export holds NaN or
+    // a non-positive w (vertex kill); NHL 24 hides UI elements that way. Emulated with a cull
+    // distance written by the vertex epilogue.
+    bool emulate_vertex_kill{};
     bool needs_buffer_offsets{};
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};

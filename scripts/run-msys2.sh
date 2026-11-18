@@ -62,6 +62,15 @@ if [[ $profile == nhl24 ]]; then
     export BB_DETERMINISTIC_FP=${BB_DETERMINISTIC_FP:-1}
     echo "run-msys2: NHL 24: PS4 floating-point mode (BB_DETERMINISTIC_FP=$BB_DETERMINISTIC_FP)"
 fi
+# NHL 24: the graphics settings it reached a match with (NHL 19's): readbacks with the linear ones,
+# no write twins, no write windows or single-stepped writes (with them on, the match load ended on a
+# GPU assertion: "Buffer request cannot span more than two VA arena pages"), background pre-upload,
+# Z16+S8 depth kept as D16. Each can still be overridden from the command line.
+if [[ $profile == nhl24 ]]; then
+    export BB_READBACKS=${BB_READBACKS:-1} BB_READBACK_LINEAR=${BB_READBACK_LINEAR:-1} BB_GPU_WRITE_TWINS=${BB_GPU_WRITE_TWINS:-0}
+    export BB_WRITE_WINDOW=${BB_WRITE_WINDOW:-0} BB_WRITE_STEP=${BB_WRITE_STEP:-0} BB_PREUPLOAD=${BB_PREUPLOAD:-1} BB_Z16S8_AS_D16=${BB_Z16S8_AS_D16:-1}
+    echo "run-msys2: NHL 24 graphics defaults: readbacks $BB_READBACKS, linear $BB_READBACK_LINEAR, pre-upload $BB_PREUPLOAD, write windows $BB_WRITE_WINDOW, stepped writes $BB_WRITE_STEP"
+fi
 # Ignite games (UFC 3, NHL 19): the 3D scene renders black without precise readbacks of linear
 # images (shadPS4 issue #4375 for UFC 4, same engine); the rest as run.sh's ufc3 defaults: twins
 # off (they deadlock against precise readbacks), write windows + pre-upload + single-stepped

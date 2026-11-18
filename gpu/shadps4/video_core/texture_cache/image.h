@@ -173,6 +173,14 @@ public:
     ImageId depth_id{};
     u64 depth_uid{};
     u64 image_uid{};
+    /// nhl24 (from HajDEO's nhl24pc): the metadata surfaces (CMASK/FMASK/HTILE) this image holds
+    /// a reference on (TextureCache::LinkMeta). Kept apart from info.meta_info, which is copied
+    /// from the buffer registers before the image is ever bound.
+    struct {
+        VAddr cmask = 0;
+        VAddr fmask = 0;
+        VAddr htile = 0;
+    } meta_links{};
 
     ImageInfo info;
     Vulkan::Runtime* runtime;

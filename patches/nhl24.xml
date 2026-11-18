@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  NHL 24 (CUSA37933 US / CUSA37934 EU) game patches, shadPS4 MemoryPatcher format, compiled into
+  out/patches.bin by scripts/patches.py during the prepare step. Addresses are eboot addresses with
+  the 0x400000 base (image offset + 0x400000).
+
+  "Synchronous replay compression" comes from the nhl24pc project by HajDEO
+  (https://github.com/HajDEO/nhl24pc, game_patches/nhl24.xml, GPL-2.0-or-later; the 1.60 address
+  from hilals' pull request #12 there). Their analysis: the game's "rplyCompress" ring schedules one
+  compression job per 128 KB replay block through a job queue that the ported job workers never
+  drain. After 64 blocks the ring wraps and waits for its first job forever: the Job3 thread spins,
+  GameSimulationLoop stalls and only the HUD keeps rendering (the faceoff freeze). Turning
+  "cmp qword ptr [rdi+8], 0 ; je +0x48" into "... ; jmp +0x48" makes the game compress inline on
+  its own synchronous path. The Signature makes patches.py check those bytes before writing (and
+  find them if a build has them elsewhere).
+-->
+<Patch>
+  <TitleID>
+    <ID>CUSA37933</ID>
+    <ID>CUSA37934</ID>
+  </TitleID>
+  <Metadata Name="Synchronous replay compression (fixes the faceoff freeze)" isEnabled="true" AppVer="01.60" AppElf="eboot.bin" Author="HajDEO / hilals (nhl24pc)">
+    <PatchList>
+      <Line Type="bytes" Address="0x068E0770" Value="EB" Signature="48 83 7F 08 00 74 48" SignatureOffset="5"/>
+    </PatchList>
+  </Metadata>
+  <Metadata Name="Synchronous replay compression (fixes the faceoff freeze)" isEnabled="true" AppVer="01.00" AppElf="eboot.bin" Author="HajDEO (nhl24pc)">
+    <PatchList>
+      <Line Type="bytes" Address="0x068ACB70" Value="EB" Signature="48 83 7F 08 00 74 48" SignatureOffset="5"/>
+    </PatchList>
+  </Metadata>
+</Patch>

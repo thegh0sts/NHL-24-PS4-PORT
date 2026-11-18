@@ -543,7 +543,18 @@ private:
     struct MetaDataInfo {
         MetaType type;
         s32 clear_mask = -1;
+        u32 refs = 0; ///< nhl24: live images linked to this metadata surface
     };
+    /// nhl24 (from HajDEO's nhl24pc): link an image to a metadata surface. The entry is created
+    /// on first use (all slices cleared, as before) and shared by every image that names the same
+    /// address; its clear state survives the deletion of any one of them and it goes away with
+    /// the last. Before, deleting any image at the address erased it, and the next target bound
+    /// there got a new entry that read as "cleared": a false fast clear of a target with real
+    /// contents (NHL 24 reuses one address for many transient targets every frame).
+    /// BB_META_ERASE=1 restores erasing with the first deletion.
+    void LinkMeta(Image& image, MetaType type, VAddr address, s32 initial_clear_mask = -1);
+    void UnlinkMeta(Image& image, MetaType type);
+    static VAddr& MetaLink(Image& image, MetaType type);
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
 };
 

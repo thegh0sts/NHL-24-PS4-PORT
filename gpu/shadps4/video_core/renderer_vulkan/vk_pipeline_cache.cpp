@@ -614,6 +614,16 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .sanitize_nan_outputs = instance.IntelWorkaroundEnabled("BB_NAN_GUARD"),
         .flatten_compute_workgroups = instance.IntelWorkaroundEnabled("BB_FLATTEN_WG"),
         .lds_divergent_barriers = instance.IntelWorkaroundEnabled("BB_LDS_DIVERGENT"),
+        .lds_split_wave_barriers = [&] {
+            if (const char* env = std::getenv("BB_SPLIT_WAVE_BARRIERS")) {
+                return env[0] == '1';
+            }
+            return instance.SubgroupSize() < 64;
+        }(),
+        .emulate_vertex_kill = [] {
+            const char* env = std::getenv("BB_VTX_KILL");
+            return !env || env[0] != '0';
+        }(),
         .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
@@ -637,7 +647,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         const u32 variant = (profile.sanitize_nan_outputs ? 1u : 0u) |
                             (profile.flatten_compute_workgroups ? 2u : 0u) |
                             (profile.lds_divergent_barriers ? 4u : 0u) | (intel_lds ? 8u : 0u) |
-                            (subgroup32 ? 16u : 0u);
+                            (subgroup32 ? 16u : 0u) |
+                            (profile.lds_split_wave_barriers ? 32u : 0u) |
+                            // bbport: wave64 lowering inside uniform loops (shaders change).
+                            (profile.subgroup_size < 64 ? 64u : 0u) |
+                            (profile.emulate_vertex_kill ? 128u : 0u);
         SetShaderBinaryVariant(variant);
         if (variant || instance.IsIntelDriver()) {
             std::printf("GPU: Intel workarounds: NaN guard %s, 1D compute workgroups %s, LDS "

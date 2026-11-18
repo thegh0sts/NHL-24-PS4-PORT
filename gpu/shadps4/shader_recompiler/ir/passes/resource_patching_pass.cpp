@@ -114,7 +114,10 @@ public:
 
     u32 Add(const ImageResource& desc) {
         const u32 index{Add(image_resources, desc, [&desc](const auto& existing) {
+            // nhl24 (R10 from HajDEO's nhl24pc): colour sampling and depth compare of the same
+            // T# need separate bindings (a depth-compare view vs a colour view).
             return desc.sharp_fetch == existing.sharp_fetch && desc.is_array == existing.is_array &&
+                   desc.is_depth == existing.is_depth &&
                    desc.mip_fallback_mode == existing.mip_fallback_mode &&
                    desc.constant_mip_index == existing.constant_mip_index &&
                    desc.post_op == existing.post_op;

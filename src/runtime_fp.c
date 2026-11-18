@@ -735,26 +735,43 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
     if (!area) { stats->unpatched = count; free(sites); free(c.targets); return 0; }
     unsigned char *p = area;
     uint64_t covered_until = 0;
-    /* A function's red-zone accesses move together or not at all: if one of them cannot be
-     * rewritten (the next instructions cannot move), a write moved 64 KiB lower and a read left
-     * in place no longer meet (NHL 20: FUN_00710920 read [rsp-0x20] from where nothing had been
-     * written, and SimThread crashed on a wild index). So a dry run first finds the functions
-     * with such an access (their sites carry the function's end), and those are left alone. */
-    uint64_t *bad_ends = NULL, bad_count = 0, bad_capacity = 0, bad_sites = 0;
-    for (int dry = 1; dry >= 0; --dry) {
+    /* Accesses to the same red-zone bytes move together or stay together: if one of them cannot be
+     * rewritten (the next instructions cannot move), a write moved 64 KiB lower and a read left in
+     * place no longer meet (NHL 20: FUN_00710920 read [rsp-0x20] where nothing had been written,
+     * and SimThread crashed on a wild index). So dry runs find the accesses that stay, and with
+     * them every access of the same function that overlaps their bytes, until nothing changes. A
+     * function where one stays and the red zone is reached another way too (a lea of it, or an
+     * index register) is left alone as a whole. The rest of each function still moves, so its
+     * other red-zone data stays protected. */
+    int32_t *lo = malloc(count * sizeof(*lo)), *hi = malloc(count * sizeof(*hi));
+    unsigned char *keep = calloc(count ? count : 1, 1), *loose = malloc(count ? count : 1);
+    if (!lo || !hi || !keep || !loose) { free(lo); free(hi); free(keep); free(loose); free(sites); free(c.targets); return 0; }
+    for (uint64_t i = 0; i < count; ++i) {
+        ZydisDecodedInstruction in;
+        ZydisDecodedOperand op[ZYDIS_MAX_OPERAND_COUNT];
+        loose[i] = 1; lo[i] = INT32_MIN; hi[i] = 0;
+        if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, image + sites[2 * i], sites[2 * i + 1] - sites[2 * i], &in, op))) continue;
+        for (unsigned k = 0; k < in.operand_count_visible; ++k)
+            if (op[k].type == ZYDIS_OPERAND_TYPE_MEMORY && op[k].mem.base == ZYDIS_REGISTER_RSP) {
+                const int32_t width = op[k].size >= 8 ? (int32_t)(op[k].size / 8) : 1;
+                lo[i] = (int32_t)op[k].mem.disp.value;
+                hi[i] = lo[i] + width;
+                loose[i] = in.mnemonic == ZYDIS_MNEMONIC_LEA || op[k].mem.index != ZYDIS_REGISTER_NONE;
+                break;
+            }
+    }
+    uint64_t kept_sites = 0, kept_functions = 0, whole_functions = 0;
+    for (int dry = 1, changed = 1, rounds = 0; dry >= 0;) {
     p = area;
     covered_until = 0;
+    changed = 0;
     /* Pass 2: a stub per site, with the instructions it displaces. */
     for (uint64_t i = 0; i < count; ++i) {
         const uint64_t at = sites[2 * i], end = sites[2 * i + 1];
-        if (!dry) {
-            int bad = 0;
-            for (uint64_t b = 0; b < bad_count && !bad; ++b) bad = bad_ends[b] == end;
-            if (bad) { ++bad_sites; continue; }
-        }
+        if (keep[i]) continue;
         if (at < covered_until) { if (!dry) ++stats->patched; continue; } /* rewritten inside the previous stub */
         unsigned char *stub = p, *q = p;
-        uint64_t length = 0;
+        uint64_t length = 0, follower = i;
         int ok = 1;
         while (ok && length < JMP) {
             ZydisDecodedInstruction in;
@@ -762,7 +779,10 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
             const uint64_t here = at + length;
             if (here >= end || (length && is_target(&c, here)) || (size_t)(q - stub) > REDZONE_STUB - 40 ||
                 !ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, image + here, end - here, &in, op))) { ok = 0; break; }
-            if (REDZONE_WANTED(here) && redzone_site(&in, op, image + here)) q = emit_shifted(q, image + here, &in);
+            while (follower < count && sites[2 * follower] < here) ++follower;
+            const int site_here = follower < count && sites[2 * follower] == here;
+            if (site_here && keep[follower]) ok = 0; /* an access that stays cannot ride along in a stub */
+            else if (REDZONE_WANTED(here) && redzone_site(&in, op, image + here)) q = emit_shifted(q, image + here, &in);
             else if (redzone_site(&in, op, image + here)) ok = 0; /* outside the range: stays where it is */
             else if (length && length + in.length >= JMP && relative_jump(&in)) {
                 const unsigned char *target = image + here + in.length + in.raw.imm[0].value.s;
@@ -790,21 +810,9 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
             ok = rel32(q + 5, image + at + length, &back) && rel32(image + at + JMP, stub, &to_stub);
         }
         if (!ok) {
-            if (!dry) { /* only without function ranges (segments as one range): just this access stays */
+            if (!dry) { /* cannot happen after the dry runs settled; kept, to be safe */
                 if (stats->unpatched++ < 8) printf("Red zone: the access at image offset 0x%" PRIx64 " is kept (the next instructions cannot move)\n", at);
-            } else if (stats->functions) {
-                if (!bad_count || bad_ends[bad_count - 1] != end) {
-                    if (bad_count == bad_capacity) {
-                        uint64_t *grown = realloc(bad_ends, (bad_capacity = bad_capacity ? bad_capacity * 2 : 64) * sizeof(*bad_ends));
-                        if (!grown) { free(bad_ends); free(sites); free(c.targets); return 0; }
-                        bad_ends = grown;
-                    }
-                    bad_ends[bad_count++] = end;
-                    if (bad_count <= 8)
-                        printf("Red zone: the access at image offset 0x%" PRIx64 " cannot move (the next instructions cannot move): "
-                               "its function is left alone\n", at);
-                }
-            }
+            } else { keep[i] = 1; changed = 1; }
             continue;
         }
         memcpy(q + 1, &back, 4);
@@ -816,12 +824,46 @@ uint64_t runtime_redzone_patch_image(unsigned char *image, uint64_t size, const 
         memset(image + at + JMP, 0xcc, length - JMP);
         ++stats->patched;
     }
+    if (!dry) break;
+    /* Spread each kept access to the accesses of its function that share bytes with it. */
+    for (uint64_t f = 0; f < count;) {
+        uint64_t g = f;
+        while (g < count && sites[2 * g + 1] == sites[2 * f + 1]) ++g;
+        int any = 0, any_loose = 0;
+        for (uint64_t i = f; i < g; ++i) { any |= keep[i]; any_loose |= loose[i]; }
+        if (!stats->functions) { f = g; continue; } /* no function ranges: one segment, no spreading */
+        if (any && any_loose) {
+            for (uint64_t i = f; i < g; ++i) if (!keep[i]) { keep[i] = 1; changed = 1; }
+        } else if (any) {
+            for (int grew = 1; grew;) {
+                grew = 0;
+                for (uint64_t i = f; i < g; ++i) if (keep[i])
+                    for (uint64_t j = f; j < g; ++j)
+                        if (!keep[j] && lo[j] < hi[i] && lo[i] < hi[j]) { keep[j] = 1; grew = changed = 1; }
+            }
+        }
+        f = g;
     }
-    stats->unpatched += bad_sites;
-    if (bad_count)
-        printf("Red zone: %" PRIu64 " accesses in %" PRIu64 " functions left alone (one of their accesses cannot move)\n",
-               bad_sites, bad_count);
-    free(bad_ends);
+    if (!changed || ++rounds > 64) dry = 0;
+    }
+    for (uint64_t f = 0; f < count;) {
+        uint64_t g = f, n = 0;
+        while (g < count && sites[2 * g + 1] == sites[2 * f + 1]) ++g;
+        for (uint64_t i = f; i < g; ++i) n += keep[i];
+        if (n) {
+            kept_sites += n; ++kept_functions;
+            if (n == g - f) ++whole_functions;
+            if (kept_functions <= 8)
+                printf("Red zone: in the function ending at image offset 0x%" PRIx64 ", %" PRIu64 " of %" PRIu64
+                       " accesses stay (one of them cannot move; the others share its bytes)\n", sites[2 * f + 1], n, g - f);
+        }
+        f = g;
+    }
+    stats->unpatched += kept_sites;
+    if (kept_sites)
+        printf("Red zone: %" PRIu64 " accesses in %" PRIu64 " functions stay where they are with every access to the same bytes "
+               "(%" PRIu64 " of these functions as a whole)\n", kept_sites, kept_functions, whole_functions);
+    free(lo); free(hi); free(keep); free(loose);
     stats->stub_bytes = (uint64_t)(p - area);
     if (platform_protect(area, area_size, PROT_READ | PROT_EXEC)) {
         fputs("STOP: red zone: cannot make the stubs executable\n", stderr);

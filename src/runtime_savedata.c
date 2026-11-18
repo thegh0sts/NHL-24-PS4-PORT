@@ -121,17 +121,52 @@ static ABI int32_t save_terminate(void) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     initialized=0; return 0;
 }
-static int32_t mount_impl(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result);
+/* NHL 19 (and 21): save sizes as the console reports them. A save's size is fixed when it is created (the
+ * blocks the game asks for, 32 KiB each); it is kept in <save>.sce_sys/blocks. The game adds up its
+ * saves' sizes from the folder search: reporting 1 GiB for each made it decide there was not
+ * enough storage for a new mode save ("Save warning"). Older saves without the file count their
+ * files' size. */
+static uint64_t used_blocks(const char *host) {
+    uint64_t bytes=0;
+    PlatformListing *d=platform_list_directory(host);
+    for (size_t i=0; d && i<d->count; ++i) {
+        char path[800]; PlatformStat st;
+        snprintf(path,sizeof(path),"%s/%s",host,d->names+d->offsets[i]);
+        if (!platform_stat(path,&st) && st.is_reg) bytes+=(uint64_t)st.size;
+    }
+    if (d) platform_free_listing(d);
+    return (bytes+32767)/32768;
+}
+static uint64_t stored_blocks(const char *meta) {
+    char path[720]; snprintf(path,sizeof(path),"%s/blocks",meta);
+    unsigned long long v=0; FILE *f=fopen(path,"r");
+    if (f) { if (fscanf(f,"%llu",&v)!=1) v=0; fclose(f); }
+    return v;
+}
+static void store_blocks(const char *meta, uint64_t blocks) {
+    char path[720], text[32]; snprintf(path,sizeof(path),"%s/blocks",meta);
+    int n=snprintf(text,sizeof(text),"%llu\n",(unsigned long long)blocks);
+    write_atomic(path,text,(size_t)n);
+}
+/* Size and free blocks of a save (host folder + metadata folder). */
+static void save_size(const char *host, const char *meta, uint64_t *blocks, uint64_t *free_blocks) {
+    const uint64_t used=used_blocks(host);
+    uint64_t size=stored_blocks(meta);
+    if (size<used) size=used;
+    if (size<96) size=96; /* the console's minimum save size (3 MiB) */
+    *blocks=size; *free_blocks=size-used;
+}
+static int32_t mount_impl(int32_t user, const char *title, const DirName *dir, uint32_t mode, uint64_t blocks, MountResult *result);
 /* ufc3: every failed save-data call is logged (career saves failed with no trace). */
 static int32_t logged(const char *what, const char *name, int32_t r) {
     if (r) printf("Runtime: %s%s%s failed: 0x%08X\n", what, name ? " " : "", name ? name : "", (uint32_t)r);
     return r;
 }
-static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
+static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, uint64_t blocks, MountResult *result) {
     char name[64]; snprintf(name,sizeof(name),"'%.32s' mode 0x%x",dir ? dir->data : "?",mode);
-    return logged("save mount",name,mount_impl(user,title,dir,mode,result));
+    return logged("save mount",name,mount_impl(user,title,dir,mode,blocks,result));
 }
-static int32_t mount_impl(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
+static int32_t mount_impl(int32_t user, const char *title, const DirName *dir, uint32_t mode, uint64_t blocks, MountResult *result) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (user<0) return ERR_INVALID_USER;
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
@@ -146,7 +181,16 @@ static int32_t mount_impl(int32_t user, const char *title, const DirName *dir, u
      * when the game saves; on the console the save was created earlier (career start), which
      * never happens here, so the game showed "An error has occurred while saving". A read-write
      * mount of a missing save creates it; read-only probes still find nothing. */
-    if (!exists && (mode & MODE_RDWR) && !(mode & (MODE_CREATE|MODE_CREATE2))) {
+    /* NHL 19: only for UFC 3. NHL 19 mounts its mode saves (BeAGM0-19: Franchise, Season, Be a
+     * Pro...) read-write first to see whether they exist; a save made here (empty, "created")
+     * instead of the console's "not found" ended in its "not enough system storage" warning.
+     * BB_SAVE_AUTOCREATE=1/0 forces it for any game. */
+    static int autocreate=-1;
+    if (autocreate<0) {
+        const char *forced=getenv("BB_SAVE_AUTOCREATE"), *profile=getenv("BB_GAME_PROFILE");
+        autocreate = forced && *forced ? *forced=='1' : !profile || !strcmp(profile,"ufc3");
+    }
+    if (autocreate && !exists && (mode & MODE_RDWR) && !(mode & (MODE_CREATE|MODE_CREATE2))) {
         printf("Runtime: save data '%s' missing for a read-write mount: created\n",dir->data);
         mode |= MODE_CREATE2;
     }
@@ -159,7 +203,7 @@ static int32_t mount_impl(int32_t user, const char *title, const DirName *dir, u
     }
     if (slot<0) { pthread_mutex_unlock(&lock); return ERR_MOUNT_FULL; }
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
-    if (!exists) { Param empty={0}; write_param(meta,&empty); }
+    if (!exists) { Param empty={0}; write_param(meta,&empty); if (blocks) store_blocks(meta,blocks); }
     slots[slot].used=1;
     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
     snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
@@ -171,17 +215,17 @@ static int32_t mount_impl(int32_t user, const char *title, const DirName *dir, u
     runtime_file_mount(result->point.data,host);
     ++mounts_done;
     pthread_mutex_unlock(&lock);
-    printf("Runtime: save data '%s' mounted at %s (%s%s)\n",dir->data,result->point.data,
-           exists ? "existing" : "created",(mode & MODE_RDONLY) ? ", read-only" : "");
+    printf("Runtime: save data '%s' mounted at %s (%s%s; mode 0x%x, %llu blocks asked)\n",dir->data,result->point.data,
+           exists ? "existing" : "created",(mode & MODE_RDONLY) ? ", read-only" : "",mode,(unsigned long long)blocks);
     return 0;
 }
 static ABI int32_t save_mount(const Mount1 *m, MountResult *result) {
     if (!m) return ERR_PARAMETER;
-    return mount(m->user,m->title ? m->title->data : NULL,m->dir,m->mode,result);
+    return mount(m->user,m->title ? m->title->data : NULL,m->dir,m->mode,m->blocks,result);
 }
 static ABI int32_t save_mount2(const Mount2 *m, MountResult *result) {
     if (!m) return ERR_PARAMETER;
-    return mount(m->user,NULL,m->dir,m->mode,result);
+    return mount(m->user,NULL,m->dir,m->mode,m->blocks,result);
 }
 static int slot_of(const MountPoint *point) {
     if (!point || strncmp(point->data,"/savedata",9)) return -1;
@@ -203,9 +247,14 @@ static ABI int32_t save_mount_info(const MountPoint *point, MountInfo *info) {
     if (!info) return ERR_PARAMETER;
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
+    char host[700]="", meta[700]="";
+    if (slot>=0) { snprintf(host,sizeof(host),"%s",slots[slot].host); snprintf(meta,sizeof(meta),"%s",slots[slot].meta); }
     pthread_mutex_unlock(&lock);
     if (slot<0) return ERR_NOT_MOUNTED;
-    memset(info,0,sizeof(*info)); info->blocks=32768; info->free_blocks=32000;
+    memset(info,0,sizeof(*info)); save_size(host,meta,&info->blocks,&info->free_blocks);
+    static unsigned shown;
+    if (shown++<16) printf("Runtime: save mount info %s: %llu blocks, %llu free\n",point->data,
+                           (unsigned long long)info->blocks,(unsigned long long)info->free_blocks);
     return 0;
 }
 /* No backups, icons or transfer data exist: the queries find nothing; an unmount with backup is
@@ -341,9 +390,12 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
     for (uint32_t i=0;i<set;++i) {
         if (result->names) memcpy(result->names[i].data,entries[i].name,32);
         if (result->params) result->params[i]=entries[i].param;
-        if (result->infos) { memset(&result->infos[i],0,sizeof(SearchInfo)); result->infos[i].blocks=32768; result->infos[i].free_blocks=16384; }
+        if (result->infos) { memset(&result->infos[i],0,sizeof(SearchInfo)); char h[700], m[700]; snprintf(h,sizeof(h),"%s/%s",base,entries[i].name); snprintf(m,sizeof(m),"%s/%s.sce_sys",base,entries[i].name); save_size(h,m,&result->infos[i].blocks,&result->infos[i].free_blocks); }
     }
     result->set_count=set;
+    static unsigned shown;
+    if (shown++<16) printf("Runtime: save search '%s' (key %u): %zu found, %u returned%s\n",
+                           cond->dir ? cond->dir->data : "",cond->key,count,set,result->infos ? ", with sizes" : "");
     free(entries);
     return 0;
 }

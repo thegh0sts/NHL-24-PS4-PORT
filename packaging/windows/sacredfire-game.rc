@@ -2,7 +2,7 @@
 // and the other console programs (compiled with llvm-windres through CMake).
 #include <winver.h>
 1 24 "sacredfire-game.manifest"
-1 ICON "NHL19.ico"
+1 ICON "NHL24.ico"
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 0,3,0,0
  PRODUCTVERSION 0,3,0,0
@@ -16,10 +16,10 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "FileDescription", "NHL 19 native PC port: game"
+            VALUE "FileDescription", "NHL 24 native PC port: game"
             VALUE "InternalName", "sacredfire"
             VALUE "LegalCopyright", "GPL-2.0-or-later. Contains code from bbport and shadPS4. Not affiliated with Sony, Electronic Arts or the NHL."
-            VALUE "ProductName", "NHL 19 native PC port"
+            VALUE "ProductName", "NHL 24 native PC port"
             VALUE "ProductVersion", "0.3"
         END
     END

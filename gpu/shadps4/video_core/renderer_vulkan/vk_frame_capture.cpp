@@ -140,6 +140,17 @@ bool CaptureOnFlip() {
     }();
     return on;
 }
+// nhl24: NHL 24 flips while the GPU is partway into the next frame, so one flip-to-flip capture
+// stops before lighting and anti-aliasing. BB_CAPTURE_FLIPS=N records across N flips (1-8).
+int CaptureFlips() {
+    static const int n = [] {
+        const char* e = std::getenv("BB_CAPTURE_FLIPS");
+        const int v = e ? std::atoi(e) : 1;
+        return v < 1 ? 1 : (v > 8 ? 8 : v);
+    }();
+    return n;
+}
+int flips_left = 0; // GPU thread only
 } // namespace
 
 void FrameCapture::OnFlip(VAddr presented_address) {
@@ -188,7 +199,11 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
                              const VideoCore::ImageInfo* depth) {
     if (CaptureOnFlip() && flip_boundary.exchange(false, std::memory_order_acq_rel)) {
         const auto st = state.load(std::memory_order_relaxed);
-        if (st == Recording && !entries.empty()) {
+        if (st == Recording && !entries.empty() && --flips_left > 0) {
+            // nhl24: keep recording across this flip (BB_CAPTURE_FLIPS); mark where it fell.
+            entries.push_back({.compute = true, .note = "---- flip ----"});
+            pass_open = false;
+        } else if (st == Recording && !entries.empty()) {
             Write(last_presented.load(std::memory_order_relaxed));
             entries.clear();
             pending_sampled.clear();
@@ -199,6 +214,7 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
             pending_sampled.clear();
             pending_buffers.clear();
             pass_open = false;
+            flips_left = CaptureFlips();
             state.store(Recording, std::memory_order_release);
         }
     }
@@ -270,7 +286,11 @@ void FrameCapture::Draw(u64 vs_hash, u64 ps_hash, u32 num_indices, u32 num_insta
 void FrameCapture::Dispatch(u64 cs_hash, u32 x, u32 y, u32 z) {
     if (CaptureOnFlip() && flip_boundary.exchange(false, std::memory_order_acq_rel)) {
         const auto st = state.load(std::memory_order_relaxed);
-        if (st == Recording && !entries.empty()) {
+        if (st == Recording && !entries.empty() && --flips_left > 0) {
+            // nhl24: keep recording across this flip (BB_CAPTURE_FLIPS); mark where it fell.
+            entries.push_back({.compute = true, .note = "---- flip ----"});
+            pass_open = false;
+        } else if (st == Recording && !entries.empty()) {
             Write(last_presented.load(std::memory_order_relaxed));
             entries.clear();
             pending_sampled.clear();
@@ -281,6 +301,7 @@ void FrameCapture::Dispatch(u64 cs_hash, u32 x, u32 y, u32 z) {
             pending_sampled.clear();
             pending_buffers.clear();
             pass_open = false;
+            flips_left = CaptureFlips();
             state.store(Recording, std::memory_order_release);
         }
     }

@@ -530,6 +530,9 @@ bool Instance::CreateDevice() {
         },
         vk::PhysicalDeviceVulkan11Features{
             .storageBuffer16BitAccess = vk11_features.storageBuffer16BitAccess,
+            // nhl24 (R7 from torpedatorpeda's NHL24-Be-a-Pro, via HajDEO's nhl24pc): 16-bit
+            // loads from uniform buffers too, when the GPU has it.
+            .uniformAndStorageBuffer16BitAccess = vk11_features.uniformAndStorageBuffer16BitAccess,
             .shaderDrawParameters = vk11_features.shaderDrawParameters,
         },
         vk::PhysicalDeviceVulkan12Features{

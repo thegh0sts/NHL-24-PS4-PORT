@@ -645,6 +645,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 }
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
+    BbStats::gpu_flip_number.fetch_add(1, std::memory_order_relaxed); // nhl24: flat GPU clock
     rasterizer.WaitDeferredSignals();
     Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
 }
@@ -700,6 +701,29 @@ void WriteEosLabel(void* address, u64 value, u32 num_bytes, u64 packet_seq,
         rasterizer->NoteLateCommandWrite(reinterpret_cast<VAddr>(address), &value, num_bytes);
     }
     BbFreeCheck::NoteFenceWritten(reinterpret_cast<u64>(address));
+}
+
+// nhl24 (from HajDEO's nhl24pc): RELEASE_MEM fences (NHL 24's compute queue, every frame) are
+// written like the end-of-pipe labels: through the backing view, so a page the caches track does
+// not fault (the fault's readback drained the GPU at a random point of the frame), and the GPU
+// copy is told about the value.
+// BB_RELEASE_MEM_BACKING=0 restores the plain store.
+void WriteReleaseLabel(void* address, u64 value, u32 num_bytes) {
+    static const bool backing = [] {
+        const char* env = std::getenv("BB_RELEASE_MEM_BACKING");
+        return !env || env[0] != '0';
+    }();
+    auto* memory = Core::Memory::Instance();
+    if (!backing) {
+        std::memcpy(address, &value, num_bytes);
+        return;
+    }
+    if (!memory->TryWriteBacking(address, &value, num_bytes)) {
+        StoreLabel(address, value, num_bytes);
+    }
+    if (auto* rasterizer = memory->GetRasterizer()) {
+        rasterizer->NoteLateCommandWrite(reinterpret_cast<VAddr>(address), &value, num_bytes);
+    }
 }
 
 void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
@@ -1340,6 +1364,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         rasterizer->RunInOrder(&SignalFlip, header, sizeof(u32),
                                                BbToggle::PipelinedMemoryWrites, false);
                     } else {
+                        BbStats::gpu_flip_number.fetch_add(1, std::memory_order_relaxed);
                         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
                     }
                     break;
@@ -2279,6 +2304,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                             }
                         }
                         release.SignalFence(
+                            WriteReleaseLabel,
                             [pipe_id] {
                                 Platform::IrqC::Instance()->Signal(
                                     static_cast<Platform::InterruptId>(pipe_id));
@@ -2315,6 +2341,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 rasterizer->ProcessDownloadImages();
             }
             release_mem->SignalFence(
+                WriteReleaseLabel,
                 [pipe_id = queue.pipe_id] {
                     Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
                 },

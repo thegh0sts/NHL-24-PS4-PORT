@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
@@ -853,9 +854,13 @@ void TextureCache::WatchImage(const Image& image, const char* what) {
         return;
     }
     static std::atomic<u32> printed{0};
-    if (printed.fetch_add(1) < 300) {
-        std::printf("Image watch %#llx: %s, flags %#x\n", (unsigned long long)watched, what,
-                    u32(image.flags));
+    if (printed.fetch_add(1) < 2000) {
+        // nhl24: which image (several can share an address), its size, format and tiling.
+        std::printf("Image watch %#llx: %s, flags %#x, image %llu %ux%u fmt %u tile %u levels %u\n",
+                    (unsigned long long)watched, what, u32(image.flags),
+                    (unsigned long long)image.image_uid, image.info.size.width,
+                    image.info.size.height, u32(image.info.pixel_format),
+                    u32(image.info.tile_mode), image.info.resources.levels);
     }
 }
 
@@ -878,6 +883,21 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
         // Only consider images that match base address.
         // TODO: Maybe also consider subresources
         if (image.info.guest_address != address) {
+            return;
+        }
+        // nhl24 (from HajDEO's nhl24pc): NHL 24's compute metadata clears (small, CMASK-sized
+        // writes) land on the base address of live 1080p render / depth targets every frame.
+        // Reloading the whole target from the buffer cache for that replaced what the GPU had
+        // rendered into it with the buffer's copy (BB_IMAGE_WATCH 0x110aa00000: the 1920x1080
+        // depth target refreshed every frame). Writes smaller than 1/8 of a GPU-rendered target
+        // are ignored; BB_GPU_INVAL_SMALL=1 restores the old behaviour.
+        static const bool skip_small = [] {
+            const char* env = std::getenv("BB_GPU_INVAL_SMALL");
+            return !env || env[0] != '1';
+        }();
+        if (skip_small && (image.usage.render_target || image.usage.depth_target) &&
+            True(image.flags & ImageFlagBits::GpuModified) && max_size * 8 < image.info.guest_size) {
+            WatchImage(image, "GPU write (small, ignored)");
             return;
         }
         // Ensure image is reuploaded when accessed again.
@@ -955,7 +975,20 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
-        runtime.CopyColorAndDepth(&cache_image, &new_image);
+        // nhl24 (from HajDEO's nhl24pc): NHL 24 aliases its depth buffer memory with a colour
+        // render target of the same size and switches between the two every frame. The old bits
+        // only matter when the new image is going to be read (texture / storage); a render or
+        // depth target is overwritten by the game, and the copied bits (depth reinterpreted as
+        // colour) cost a full-size copy per frame and leak garbage into areas not redrawn.
+        // BB_DEPTH_ALIAS_COPY=1 copies for targets too, as before.
+        static const bool copy_for_targets = [] {
+            const char* env = std::getenv("BB_DEPTH_ALIAS_COPY");
+            return env && env[0] == '1';
+        }();
+        if (copy_for_targets || binding == BindingType::Texture ||
+            binding == BindingType::Storage) {
+            runtime.CopyColorAndDepth(&cache_image, &new_image);
+        }
 
         // Free the cache image.
         FreeImage(cache_image_id);
@@ -1008,6 +1041,34 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
         if (const auto depth_image_id = ResolveDepthOverlap(image_info, binding, cache_image_id)) {
             return {depth_image_id, -1, -1};
+        }
+
+        // bbport: NHL 24 (from HajDEO's nhl24pc v0.9.1): dynamic resolution re-describes the
+        // same render target with a new width, height and pitch every few frames (cutscenes,
+        // intros, some camera views, 1600x904 up to 1920x1080). Serving that request with the
+        // old-size image clips draws and shifts normalized sampling, so the image is recreated
+        // at the requested size and the common region is copied over. On for the nhl24 profile;
+        // BB_DRS_RESIZE=1 / 0 forces it on or off for any game.
+        static const bool drs_resize = [] {
+            if (const char* env = std::getenv("BB_DRS_RESIZE")) {
+                return std::string_view{env} == "1";
+            }
+            const char* profile = std::getenv("BB_GAME_PROFILE");
+            return profile && std::string_view{profile} == "nhl24";
+        }();
+        if (drs_resize && image_info.size != cache_image.info.size &&
+            image_info.type == AmdGpu::ImageType::Color2D &&
+            cache_image.info.type == AmdGpu::ImageType::Color2D &&
+            image_info.pixel_format == cache_image.info.pixel_format &&
+            image_info.num_samples == cache_image.info.num_samples &&
+            image_info.resources.layers == 1 && cache_image.info.resources.layers == 1 &&
+            !image_info.props.is_block && !cache_image.info.props.is_block) {
+            ImageInfo resized_info = image_info;
+            resized_info.resources.levels = std::min<u32>(
+                std::max(image_info.resources.levels, cache_image.info.resources.levels),
+                std::bit_width(std::max(image_info.size.width, image_info.size.height)));
+            resized_info.UpdateSize();
+            return {ExpandImage(resized_info, cache_image_id), -1, -1};
         }
 
         // Compressed view of uncompressed image with same block size.
@@ -1123,6 +1184,11 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             return {merged_image_id, -1, -1};
         }
 
+        // nhl24 (PR #7 to HajDEO's nhl24pc, crash at the end of a match / between periods):
+        // same format and tiling, larger guest size but fewer resources means the address was
+        // reused for a different image. Log the first few and recover instead of aborting.
+        static std::atomic<u64> unresolved_overlaps{0};
+        if (unresolved_overlaps.fetch_add(1, std::memory_order_relaxed) < 3) {
         // Enhanced debug logging for unreachable case
         // Calculate expected size based on format and dimensions
         u64 expected_size =
@@ -1237,8 +1303,12 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
                   merged_image_id.index, static_cast<int>(binding), scheduler.CurrentTick(),
                   scheduler.CurrentTick() - cache_image.tick_accessed_last);
+        }
 
-        UNREACHABLE_MSG("Encountered unresolvable image overlap with equal memory address.");
+        if (safe_to_delete) {
+            FreeImage(cache_image_id);
+        }
+        return {merged_image_id, -1, -1};
     }
 
     // Right overlap, the image requested is a possible subresource of the image from cache.
@@ -1264,7 +1334,15 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                 if (cache_image.binding.is_target) {
                     cache_image.binding.needs_rebind = 1u;
                     if (merged_image_id) {
-                        GetImage(merged_image_id).binding.is_target = 1u;
+                        auto& merged_image = GetImage(merged_image_id);
+                        merged_image.binding.is_target = 1u;
+                        // nhl24 (from HajDEO's nhl24pc): the subresource may already hold
+                        // rendered data (an earlier draw into this mip); on real hardware it is
+                        // the same memory, so carry it over instead of leaving the merged mip
+                        // with stale guest bytes.
+                        if (True(cache_image.flags & ImageFlagBits::GpuModified)) {
+                            runtime.CopyMip(&cache_image, &merged_image, mip, slice);
+                        }
                     }
 
                     FreeImage(cache_image_id);
@@ -1646,15 +1724,11 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 
     // Register meta data for this color buffer
     if (desc.info.meta_info.cmask_addr) {
-        surface_metas.emplace(desc.info.meta_info.cmask_addr,
-                              MetaDataInfo{.type = MetaType::CMask});
-        image.info.meta_info.cmask_addr = desc.info.meta_info.cmask_addr;
+        LinkMeta(image, MetaType::CMask, desc.info.meta_info.cmask_addr);
     }
 
     if (desc.info.meta_info.fmask_addr) {
-        surface_metas.emplace(desc.info.meta_info.fmask_addr,
-                              MetaDataInfo{.type = MetaType::FMask});
-        image.info.meta_info.fmask_addr = desc.info.meta_info.fmask_addr;
+        LinkMeta(image, MetaType::FMask, desc.info.meta_info.fmask_addr);
     }
 
     return image.FindView(desc.view_info, false);
@@ -1671,10 +1745,8 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 
     // Register meta data for this depth buffer
     if (desc.info.meta_info.htile_addr) {
-        surface_metas.emplace(desc.info.meta_info.htile_addr,
-                              MetaDataInfo{.type = MetaType::HTile,
-                                           .clear_mask = image.info.meta_info.htile_clear_mask});
-        image.info.meta_info.htile_addr = desc.info.meta_info.htile_addr;
+        LinkMeta(image, MetaType::HTile, desc.info.meta_info.htile_addr,
+                 image.info.meta_info.htile_clear_mask);
     }
 
     // If there is a stencil attachment, link depth and stencil.
@@ -2315,22 +2387,77 @@ void TextureCache::TouchImage(const Image& image) {
     lru_cache.Touch(image.lru_id, gc_tick);
 }
 
+VAddr& TextureCache::MetaLink(Image& image, MetaType type) {
+    switch (type) {
+    case MetaType::CMask:
+        return image.meta_links.cmask;
+    case MetaType::FMask:
+        return image.meta_links.fmask;
+    case MetaType::HTile:
+    default:
+        return image.meta_links.htile;
+    }
+}
+
+void TextureCache::LinkMeta(Image& image, MetaType type, VAddr address, s32 initial_clear_mask) {
+    VAddr& link = MetaLink(image, type);
+    const bool new_link = link != address;
+    if (new_link && link != 0) {
+        UnlinkMeta(image, type); // moved to another metadata surface: give the old one back
+    }
+    auto [it, inserted] = surface_metas.try_emplace(
+        address, MetaDataInfo{.type = type, .clear_mask = initial_clear_mask});
+    if (new_link) {
+        link = address;
+        ++it.value().refs;
+    }
+    // Mirrored into the image info as before.
+    switch (type) {
+    case MetaType::CMask:
+        image.info.meta_info.cmask_addr = address;
+        break;
+    case MetaType::FMask:
+        image.info.meta_info.fmask_addr = address;
+        break;
+    case MetaType::HTile:
+        image.info.meta_info.htile_addr = address;
+        break;
+    }
+}
+
+void TextureCache::UnlinkMeta(Image& image, MetaType type) {
+    VAddr& link = MetaLink(image, type);
+    if (link == 0) {
+        return;
+    }
+    const VAddr address = link;
+    link = 0;
+    auto it = surface_metas.find(address);
+    if (it == surface_metas.end()) {
+        return;
+    }
+    if (it.value().refs > 0) {
+        --it.value().refs;
+    }
+    static const bool erase_legacy = [] {
+        const char* env = std::getenv("BB_META_ERASE");
+        return env && env[0] == '1';
+    }();
+    if (erase_legacy || it.value().refs == 0) {
+        surface_metas.erase(it);
+    }
+}
+
 void TextureCache::DeleteImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
 
-    // Remove any registered meta areas.
-    const auto& meta_info = image.info.meta_info;
-    if (meta_info.cmask_addr) {
-        surface_metas.erase(meta_info.cmask_addr);
-    }
-    if (meta_info.fmask_addr) {
-        surface_metas.erase(meta_info.fmask_addr);
-    }
-    if (meta_info.htile_addr) {
-        surface_metas.erase(meta_info.htile_addr);
-    }
+    // nhl24: give back this image's references on its metadata surfaces; an entry goes away
+    // with its last image (LinkMeta). Images never bound as a target hold none.
+    UnlinkMeta(image, MetaType::CMask);
+    UnlinkMeta(image, MetaType::FMask);
+    UnlinkMeta(image, MetaType::HTile);
 
     {
         std::unique_lock lk{download_images_mutex};

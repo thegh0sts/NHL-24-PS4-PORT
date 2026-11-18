@@ -599,6 +599,41 @@ T Translator::GetSrc16(const InstOperand& operand) {
                 ir.Unpack2x16(number_format, bitcast_to_u(ir.GetVccLo())), op_sel ? 1 : 0)});
         }
         break;
+    // nhl24 (from HajDEO's nhl24pc): 16-bit reads of the other special scalar registers (VCC
+    // high, M0, SCC, EXEC) select a half of the 32-bit value like a scalar GPR does (they hit
+    // the UNREACHABLE below before).
+    case OperandField::VccHi:
+    case OperandField::M0:
+    case OperandField::Scc:
+    case OperandField::ExecLo:
+    case OperandField::ExecHi: {
+        IR::U32 u;
+        switch (operand.field) {
+        case OperandField::VccHi:
+            u = ir.GetVccHi();
+            break;
+        case OperandField::M0:
+            u = ir.GetM0();
+            break;
+        case OperandField::Scc:
+            u = IR::U32{ir.Select(ir.GetScc(), ir.Imm32(1u), ir.Imm32(0u))};
+            break;
+        case OperandField::ExecLo:
+            u = IR::U32{ir.CompositeExtract(ir.UnpackUint2x32(ir.Ballot(ir.GetExec())), 0)};
+            break;
+        default:
+            u = IR::U32{ir.CompositeExtract(ir.UnpackUint2x32(ir.Ballot(ir.GetExec())), 1)};
+            break;
+        }
+        const IR::F32 half{
+            ir.CompositeExtract(ir.Unpack2x16(number_format, u), op_sel ? 1 : 0)};
+        if constexpr (is_float) {
+            value = half;
+        } else {
+            value = cast(half);
+        }
+        break;
+    }
     default:
         UNREACHABLE_MSG("Unexpected operand: {}", std::to_underlying(operand.field));
     }

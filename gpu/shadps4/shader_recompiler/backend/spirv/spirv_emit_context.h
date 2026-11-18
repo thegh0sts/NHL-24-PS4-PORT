@@ -278,6 +278,7 @@ public:
     Id sample_index{};
     Id clip_distances{};
     Id cull_distances{};
+    Id vtx_kill_cull{}; ///< nhl24: vertex kill emulation (Profile::emulate_vertex_kill)
 
     Id patch_vertices{};
     Id output_tess_level_outer{};

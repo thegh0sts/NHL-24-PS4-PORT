@@ -609,6 +609,19 @@ void EmitContext::DefineVertexBlock() {
         cull_distances = DefineVariable(type, spv::BuiltIn::CullDistance, spv::StorageClass::Output,
                                         initializer);
     }
+    // nhl24 (from HajDEO's nhl24pc): GCN discards primitives whose position exports contain NaN
+    // (vertex kill); the Vulkan clipper leaves that undefined, and NHL 24 hides UI elements
+    // exactly that way (NaN positions, negative w). Emulated with a cull distance the vertex
+    // epilogue writes: -1 for killed vertices, +1 otherwise. BB_VTX_KILL=0 turns it off.
+    if (profile.emulate_vertex_kill && sw_stage == SwStage::Vertex &&
+        hw_stage == HwStage::Vertex && !info.stores.GetAny(IR::Attribute::CullDistance) &&
+        !info.stores.GetAny(IR::Attribute::ClipDistance)) {
+        AddCapability(spv::Capability::CullDistance);
+        const Id type{TypeArray(F32[1], ConstU32(1U))};
+        const Id initializer{ConstantComposite(type, f32_zero_value)};
+        vtx_kill_cull = DefineVariable(type, spv::BuiltIn::CullDistance, spv::StorageClass::Output,
+                                       initializer);
+    }
     if (info.stores.GetAny(IR::Attribute::PointSize)) {
         output_point_size =
             DefineVariable(F32[1], spv::BuiltIn::PointSize, spv::StorageClass::Output);

@@ -11,6 +11,9 @@
 #include "core/libraries/gnmdriver/gnmdriver.h"
 #include "core/libraries/kernel/time.h"
 #include "video_core/amdgpu/pm4_opcodes.h"
+#include <algorithm>
+#include <cstdlib>
+#include "bbport_toggles.h"
 
 namespace AmdGpu {
 
@@ -341,6 +344,37 @@ static u64 GetGpuClock64() {
     auto now = std::chrono::high_resolution_clock::now();
     auto duration = now.time_since_epoch();
     auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+    // NHL 24: a "flat" GPU clock (idea from HajDEO's nhl24pc, NHLPORT_GPU_CLOCK=flat). The game
+    // times its GPU work with these timestamps and drives its dynamic resolution from them. The
+    // port's own stalls (readbacks, pipeline builds) look like a slow GPU, so the resolution hunts
+    // up and down every few frames, the texture cache rebuilds its render targets each time, and
+    // the menus and team select glitch and flicker. Flat: inside one frame each timestamp is only
+    // 2 us after the previous one, so the game sees a fast GPU and stays at full resolution;
+    // across frames the clock still follows wall time. On for the nhl24 profile;
+    // BB_GPU_CLOCK=flat / real forces it on or off for any game.
+    static const bool flat = [] {
+        if (const char* env = std::getenv("BB_GPU_CLOCK")) {
+            return std::strcmp(env, "flat") == 0;
+        }
+        const char* profile = std::getenv("BB_GAME_PROFILE");
+        return profile && std::strcmp(profile, "nhl24") == 0;
+    }();
+    if (flat) {
+        thread_local u64 frame = ~u64{0};
+        thread_local u64 last = 0;
+        // nhl24: the frame boundary is the flip in the GPU command stream (as in nhl24pc), not
+        // the present: NHL 24 presents while the GPU is partway into the next frame, so counting
+        // presents jumped the clock to wall time mid-frame, the game measured a slow GPU and its
+        // dynamic resolution kept dropping (1712x960 .. 1880x1056 at team select, frame captures).
+        const u64 current = BbStats::gpu_flip_number.load(std::memory_order_relaxed);
+        if (current != frame) {
+            frame = current;
+            last = std::max<u64>(static_cast<u64>(ticks), last + 2000);
+        } else {
+            last += 2000;
+        }
+        return last;
+    }
     return static_cast<u64>(ticks);
 }
 
@@ -952,22 +986,26 @@ struct PM4CmdReleaseMem {
         return data_lo | u64(data_hi) << 32;
     }
 
-    void SignalFence(auto&& signal_irq, auto&& gds_to_mem) const {
+    // nhl24 (from HajDEO's nhl24pc): the value goes through write_mem(address, value, num_bytes)
+    // like the end-of-pipe fences, so the caller can write it through the backing view. A plain
+    // store into a page the caches track faults, and the fault's readback drains the GPU at a
+    // random point of the frame (NHL 24 issues these on its compute queue every frame).
+    void SignalFence(auto&& write_mem, auto&& signal_irq, auto&& gds_to_mem) const {
         switch (data_sel.Value()) {
         case DataSelect::Data32Low: {
-            *Address<u32*>() = DataDWord();
+            write_mem(Address<void*>(), u64(DataDWord()), 4u);
             break;
         }
         case DataSelect::Data64: {
-            *Address<u64*>() = DataQWord();
+            write_mem(Address<void*>(), DataQWord(), 8u);
             break;
         }
         case DataSelect::GpuClock64: {
-            *Address<u64*>() = GetGpuClock64();
+            write_mem(Address<void*>(), GetGpuClock64(), 8u);
             break;
         }
         case DataSelect::PerfCounter: {
-            *Address<u64*>() = GetGpuPerfCounter();
+            write_mem(Address<void*>(), GetGpuPerfCounter(), 8u);
             break;
         }
         case DataSelect::GdsMemStore: {

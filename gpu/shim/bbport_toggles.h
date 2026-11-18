@@ -196,6 +196,9 @@ inline std::atomic<std::uint64_t> sync_recording_ns{0}, host_copies_wait_ns{0}, 
 inline std::atomic<std::uint64_t> present_wait_ns{0};
 /// Frames shown (Presenter::PrepareFrame), and bytes the background pre-upload put into the arena.
 inline std::atomic<std::uint32_t> frame_number{0};
+/// nhl24: flips reached in the GPU command stream (SignalFlip, in order with the end-of-pipe
+/// fences and their timestamps). The flat GPU clock starts a new frame here, not at present.
+inline std::atomic<std::uint64_t> gpu_flip_number{0};
 inline std::atomic<std::uint64_t> preupload_bytes{0};
 /// Device memory allocated (VMA blocks, arena residency) and freed, bytes.
 inline std::atomic<std::uint64_t> device_alloc_bytes{0}, device_free_bytes{0};
