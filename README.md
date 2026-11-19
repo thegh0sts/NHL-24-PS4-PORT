@@ -257,7 +257,9 @@ can't be shared. Saves are fine to share: they hold only your progress and setti
 
 ## Version history
 
-### Unreleased
+### v0.1.0 (2026-11-19)
+
+First test release.
 
 **Game**
 - Runs the PS4 version (CUSA37933, update 1.60) natively on Windows: intro, menus, Play Now
