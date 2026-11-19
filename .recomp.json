@@ -1,0 +1,11 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "NHL 24",
+  "wikidata": "Q121450258",
+  "system": "PS4",
+  "type": "recomp",
+  "status": "playable",
+  "targets": ["Windows"],
+  "toolchain": "Bbport",
+  "maintainers": "thegh0sts"
+}
