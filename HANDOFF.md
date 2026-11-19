@@ -1,7 +1,8 @@
 # NHL 24 PS4 port: handoff notes (2026-11-15)
 
 Repo: `C:\Users\kshla\source\repos\NHL-24-PS4-PORT`, built from the NHL 19 port (the last run's
-version string: `0.1.0-12-g01d7b14-dirty`). The README is still NHL 19's. Not touched since
+version string: `0.1.0-12-g01d7b14-dirty`). README.md and packaging/windows/README-Windows.md were
+rewritten for NHL 24 on 2026-11-19. Not touched since
 2026-11-10. These notes were written from the repo's files and its last run log; the earlier
 chat that did the work isn't available.
 
@@ -52,7 +53,7 @@ Each `apply_nhl24_*.py` patched the source once; its docstring explains the prob
    glitches with a screenshot or a short video.
 2. Move the applied `apply_nhl24_*.py` scripts out of the repo root (e.g. `tools/history/`) or
    delete them; their changes are in the source.
-3. Rewrite the README for NHL 24, then set up the GitHub repo as for the other ports.
+3. Set up the GitHub repo as for the other ports (READMEs done 2026-11-19).
 
 ## To fix later
 - **Save warning when starting a tournament** (seen 2026-11-18): the game shows a save warning
